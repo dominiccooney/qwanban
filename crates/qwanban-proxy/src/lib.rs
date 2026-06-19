@@ -5,14 +5,8 @@
 
 pub mod allowlist;
 pub mod audit;
+pub mod pipeline;
 
 pub use allowlist::{Allowlist, HostRule, HostMatch};
 pub use audit::{AuditRecord, AuditSink};
-
-use async_trait::async_trait;
-
-/// The proxy's vault access (re-exported shape from qwanban-vault).
-#[async_trait]
-pub trait ProxyVault: Send + Sync {
-    fn snapshot(&self) -> std::sync::Arc<qwanban_vault::SecretSnapshot>;
-}
+pub use pipeline::{ProxyRequest, ProxyDecision, run_pipeline, Transport, MockTransport, ProxyServer};
