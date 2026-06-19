@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qwanban-proto",
+    "crates/qwanban-core",
+    "crates/qwanban-hyperv",
+    "crates/qwanban-stub",
+    "crates/qwanban-guest",
+    "crates/qwanban-broker",
+    "crates/qwanban-proxy",
+    "crates/qwanban-inference",
+    "crates/qwanban-artifacts",
+    "crates/qwanban-vault",
+    "crates/qwanban-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal
+qwanban-proto      = { path = "crates/qwanban-proto" }
+qwanban-core       = { path = "crates/qwanban-core" }
+qwanban-hyperv     = { path = "crates/qwanban-hyperv" }
+qwanban-stub       = { path = "crates/qwanban-stub" }
+qwanban-guest      = { path = "crates/qwanban-guest" }
+qwanban-broker     = { path = "crates/qwanban-broker" }
+qwanban-proxy      = { path = "crates/qwanban-proxy" }
+qwanban-inference  = { path = "crates/qwanban-inference" }
+qwanban-artifacts  = { path = "crates/qwanban-artifacts" }
+qwanban-vault      = { path = "crates/qwanban-vault" }
+
+# Shared
+anyhow      = "1"
+thiserror   = "1"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.8"
+tokio       = { version = "1", features = ["full"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+bytes       = "1"
+uuid        = { version = "1", features = ["v4"] }
+chrono      = { version = "0.4", features = ["serde"] }
+base64      = "0.22"
+sha2        = "0.10"
+parking_lot = "0.12"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 2

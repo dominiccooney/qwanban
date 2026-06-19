@@ -1,0 +1,6 @@
+# Normalize line endings; avoid churn on cross-platform commits.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webm binary
+*.mp4 binary

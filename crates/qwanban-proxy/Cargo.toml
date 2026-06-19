@@ -1,0 +1,20 @@
+[package]
+name = "qwanban-proxy"
+description = "MITM HTTPS proxy: TLS intercept, host allowlist, dummy→real search→replace, audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qwanban-proto.workspace = true
+qwanban-vault.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
