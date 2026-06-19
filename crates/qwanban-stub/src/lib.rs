@@ -3,5 +3,7 @@
 //! **No SSH.** The protocol codec is pure logic and fully unit-testable here.
 
 pub mod protocol;
+pub mod serve;
 
 pub use protocol::{Frame, FrameKind, Hello, PushAgent, WriteFile, Launch, is_ok};
+pub use serve::{serve, ServeConfig, ServeOutcome};

@@ -10,7 +10,7 @@ rust-version.workspace = true
 qwanban-proto.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 bytes.workspace = true
 sha2.workspace = true
@@ -19,3 +19,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3"
