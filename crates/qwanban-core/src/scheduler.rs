@@ -43,6 +43,16 @@ impl Scheduler {
             released: false,
         })
     }
+
+    /// Manually release a slot (decrement the live count). Used when the RAII
+    /// `Admission` guard is forgotten (e.g. stored across an await boundary in
+    /// the orchestrator). Idempotent-safe: only call once per admitted slot.
+    pub fn release(&self) {
+        let prev = self.live.load(Ordering::Acquire);
+        if prev > 0 {
+            self.live.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 /// A RAII guard representing an admitted slot. Dropping releases it.

@@ -11,9 +11,11 @@ pub mod state;
 pub mod scheduler;
 pub mod manifest_builder;
 pub mod job;
+pub mod orchestrator;
 
 pub use job::{JobSpec, JobOutcome, JobHandle};
 pub use state::{CaseState, CaseEvent, transition};
+pub use orchestrator::LocalOrchestrator;
 
 use async_trait::async_trait;
 use qwanban_proto::QwanResult;
@@ -29,6 +31,6 @@ pub trait Orchestrator: Send + Sync {
 }
 
 pub mod prelude {
-    pub use crate::{job::*, state::*, scheduler::*, Orchestrator};
+    pub use crate::{job::*, state::*, scheduler::*, Orchestrator, LocalOrchestrator};
     pub use qwanban_proto as proto;
 }
