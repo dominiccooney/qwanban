@@ -5,5 +5,7 @@
 
 pub mod case_registry;
 pub mod ingest;
+pub mod artifact_sink;
 
 pub use case_registry::CaseRegistry;
+pub use artifact_sink::ArtifactIngestSink;

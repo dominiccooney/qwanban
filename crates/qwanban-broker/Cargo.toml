@@ -9,14 +9,16 @@ rust-version.workspace = true
 [dependencies]
 qwanban-proto.workspace = true
 qwanban-vault.workspace = true
+qwanban-artifacts.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
+tempfile = "3"
