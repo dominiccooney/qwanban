@@ -96,10 +96,11 @@ pub struct InferenceConfig {
 pub struct InferenceRoute {
     pub model: String,
     pub target: RouteTarget,
+    /// Cloud provider base URL (only for `Cloud` routes; LM Studio uses
+    /// `InferenceConfig::lmstudio_url`). No `secret` field — the proxy's
+    /// search→replace table (secrets.toml) maps the case's dummy → real key.
     #[serde(default)]
     pub base_url: Option<String>,
-    #[serde(default)]
-    pub secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
