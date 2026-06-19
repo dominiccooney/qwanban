@@ -4,6 +4,8 @@
 //! The `HyperVDriver` trait is the seam: a mock impl lets `qwanban-core` and the
 //! broker integration harness run in the dev VM with no Hyper-V.
 
+pub mod mock;
+
 use async_trait::async_trait;
 use qwanban_proto::{QwanResult, config::ResourceCaps, id::{CaseId, CheckpointId, VmId}};
 
@@ -51,3 +53,5 @@ pub trait HyperVDriver: Send + Sync {
 pub trait HvStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized> HvStream for T {}
+
+pub use mock::MockHyperVDriver;
