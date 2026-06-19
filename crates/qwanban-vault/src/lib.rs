@@ -11,10 +11,12 @@
 pub mod snapshot;
 pub mod rewriter;
 pub mod watcher;
+pub mod file_vault;
 
 pub use snapshot::{SecretSnapshot, RealSecret, RewriteEntry, SecretsFile};
 pub use rewriter::{Rewriter, RewriteResult};
 pub use watcher::VaultWatcher;
+pub use file_vault::FileVault;
 
 use async_trait::async_trait;
 use qwanban_proto::QwanResult;
@@ -30,6 +32,8 @@ pub trait Vault: Send + Sync {
     fn validate(&self) -> QwanResult<()>;
     /// Hot-reload the snapshot from disk.
     async fn reload(&self) -> QwanResult<()>;
+    /// Cheap clone of the current snapshot (for the rewriter + readers).
+    fn snapshot(&self) -> std::sync::Arc<SecretSnapshot>;
 }
 
 pub use RealSecret as SecretString;

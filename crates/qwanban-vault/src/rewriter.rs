@@ -12,6 +12,16 @@ pub struct RewriteResult {
     pub matched: Vec<usize>,
 }
 
+/// Result of rewriting a whole request (headers + url + body).
+#[derive(Debug, Clone)]
+pub struct RequestRewriteResult {
+    pub headers: Vec<u8>,
+    pub url: Vec<u8>,
+    pub body: Vec<u8>,
+    /// Merged + deduped matched table indices across all three parts.
+    pub matched: Vec<usize>,
+}
+
 /// The pure rewriter over a snapshot.
 pub struct Rewriter<'a> {
     snap: &'a SecretSnapshot,
@@ -50,6 +60,32 @@ impl<'a> Rewriter<'a> {
             }
         }
         RewriteResult { bytes: out, matched }
+    }
+
+    /// Rewrite a whole request: headers + url/query + body, in one pass per
+    /// part. Returns the three rewritten parts + the merged set of matched
+    /// table indices (for the audit record). Used by the proxy pipeline.
+    pub fn rewrite_request(
+        &self,
+        headers: &[u8],
+        url: &[u8],
+        body: &[u8],
+    ) -> RequestRewriteResult {
+        let h = self.rewrite(headers);
+        let u = self.rewrite(url);
+        let b = self.rewrite(body);
+        let mut matched = h.matched.clone();
+        matched.extend(u.matched.iter());
+        matched.extend(b.matched.iter());
+        // dedup while preserving order
+        let mut seen = std::collections::HashSet::new();
+        matched.retain(|i| seen.insert(*i));
+        RequestRewriteResult {
+            headers: h.bytes,
+            url: u.bytes,
+            body: b.bytes,
+            matched,
+        }
     }
 
     /// Convenience: did any known dummy appear in `input`?
@@ -136,5 +172,20 @@ mod tests {
         let res = r.rewrite(input);
         assert!(res.matched.is_empty());
         assert_eq!(res.bytes, input);
+    }
+
+    #[test]
+    fn rewrite_request_scans_all_three_parts_and_merges() {
+        let s = snap();
+        let r = Rewriter::new(&s);
+        // dummy in header, a different dummy in url, none in body
+        let headers = b"Authorization: Bearer ghp_qwanDUMMY01";
+        let url = b"/v1?key=sk-qwanDUMMY7c";
+        let body = b"{\"model\":\"gpt-4o\"}";
+        let res = r.rewrite_request(headers, url, body);
+        assert!(res.headers.windows(8).any(|w| w == b"ghp_REAL"));
+        assert!(res.url.windows(7).any(|w| w == b"sk-REAL"));
+        assert_eq!(res.body, body); // untouched
+        assert_eq!(res.matched, vec![0, 1]);
     }
 }
