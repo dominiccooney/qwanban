@@ -1,0 +1,26 @@
+[package]
+name = "qwanban-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+qwanban-proto.workspace = true
+qwanban-core.workspace = true
+qwanban-hyperv.workspace = true
+qwanban-stub.workspace = true
+qwanban-broker.workspace = true
+qwanban-guest.workspace = true
+qwanban-artifacts.workspace = true
+qwanban-vault.workspace = true
+qwanban-proxy.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "fs"] }
+serde_json.workspace = true
+tempfile = "3"
+parking_lot.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -2,7 +2,7 @@
 //! + state machine + Hyper-V driver + manifest builder. The driver is a trait
 //! object so tests use `MockHyperVDriver` and run fully in the dev VM.
 
-use crate::job::{JobHandle, JobKind, JobOutcome, JobSpec};
+use crate::job::{JobHandle, JobOutcome, JobSpec};
 use crate::scheduler::Scheduler;
 use crate::state::{transition, CaseEvent, CaseState};
 use crate::Orchestrator;
@@ -140,6 +140,7 @@ impl Orchestrator for LocalOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::JobKind;
     use qwanban_hyperv::MockHyperVDriver;
 
     fn cfg() -> OrchestratorConfig {

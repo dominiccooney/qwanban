@@ -6,7 +6,6 @@ use crate::case_registry::CaseRegistry;
 use crate::ingest::IngestSink;
 use async_trait::async_trait;
 use qwanban_proto::broker::IngestItem;
-use qwanban_proto::id::CaseId;
 use qwanban_proto::QwanResult;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,7 +65,7 @@ impl IngestSink for ArtifactIngestSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qwanban_proto::id::{BreadcrumbId, VideoSegmentId};
+    use qwanban_proto::id::{BreadcrumbId, CaseId, VideoSegmentId};
     use qwanban_proto::transcript::{Breadcrumb, BreadcrumbKind, TranscriptEntry};
     use qwanban_proto::video::{VideoCodec, VideoSegment};
     use qwanban_proto::clip::ClipAsset;

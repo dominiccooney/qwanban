@@ -12,6 +12,7 @@ members = [
     "crates/qwanban-artifacts",
     "crates/qwanban-vault",
     "crates/qwanban-cli",
+    "crates/qwanban-integration",
 ]
 
 [workspace.package]

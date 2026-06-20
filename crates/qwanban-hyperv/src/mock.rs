@@ -11,10 +11,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct MockVm {
+    #[allow(dead_code)]
     case_id: qwanban_proto::id::CaseId,
     state: VmState,
-    /// The host side of a duplex pair; the guest side is handed out on open_hvsocket.
-    host_side: Option<tokio::io::DuplexStream>,
+    /// The stub's end of the hvsocket duplex, stashed when `open_hvsocket`
+    /// creates the pair. A test retrieves it via `take_stub_stream` and runs
+    /// `serve()` on it (simulating the in-guest stub). `None` once taken or if
+    /// no hvsocket has been opened yet.
+    stub_side: Option<tokio::io::DuplexStream>,
 }
 
 /// An in-memory Hyper-V driver for tests.
@@ -29,6 +33,14 @@ impl MockHyperVDriver {
             vms: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
         }
+    }
+
+    /// Retrieve the stub's end of the hvsocket stream for a VM (the end
+    /// `serve()` should run on). Returns `None` if `open_hvsocket` hasn't been
+    /// called yet, or if it was already taken. This is the seam integration
+    /// tests use to drive the in-guest stub in-process.
+    pub fn take_stub_stream(&self, vm_id: &VmId) -> Option<tokio::io::DuplexStream> {
+        self.vms.lock().get_mut(vm_id).and_then(|v| v.stub_side.take())
     }
 }
 
@@ -47,14 +59,13 @@ impl HyperVDriver for MockHyperVDriver {
     async fn create_case_vm(&self, spec: VmSpec) -> QwanResult<VmHandle> {
         let n = self.next_id.fetch_add(1, Ordering::Relaxed);
         let vm_id = VmId(format!("mock-vm-{n:04x}"));
-        let (host, _guest) = tokio::io::duplex(8192);
         let handle = VmHandle { vm_id: vm_id.clone(), case_id: spec.case_id.clone() };
         self.vms.lock().insert(
             vm_id,
             MockVm {
                 case_id: spec.case_id,
                 state: VmState::Off,
-                host_side: Some(host),
+                stub_side: None,
             },
         );
         Ok(handle)
@@ -82,11 +93,12 @@ impl HyperVDriver for MockHyperVDriver {
     async fn open_hvsocket(&self, vm: &VmHandle, _port: u32) -> QwanResult<Box<dyn HvStream>> {
         let mut g = self.vms.lock();
         let entry = g.get_mut(&vm.vm_id).ok_or_else(|| qwanban_proto::not_found("vm not found"))?;
-        // Create a fresh duplex and store the host side on the VM entry (keeps it
-        // alive so the returned guest half doesn't get a broken pipe).
-        let (host, guest) = tokio::io::duplex(8192);
-        entry.host_side = Some(host);
-        Ok(Box::new(guest))
+        // Create a duplex pair: the host (orchestrator) gets one end, the stub
+        // gets the other. We stash the stub's end so a test can retrieve it via
+        // `take_stub_stream` and run `serve()` on it.
+        let (host, stub) = tokio::io::duplex(8192);
+        entry.stub_side = Some(stub);
+        Ok(Box::new(host))
     }
 
     async fn checkpoint(&self, _vm: &VmHandle, name: &str) -> QwanResult<CheckpointId> {
