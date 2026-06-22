@@ -30,30 +30,46 @@ HOST (your machine)                         GUEST (this dev VM, persistent)
 +----------------------+                   +--------------------------+
 ```
 
-## Step 1 - Guest: one-time prerequisites (elevated, on the guest VM)
+## Scripts
 
-These need admin. Run in an **elevated** PowerShell on the guest VM:
+All setup/teardown is scripted. Run them from the repo root.
+
+| Script | Where | Elevated? | Purpose |
+|--------|-------|-----------|---------|
+| `scripts/setup-host-vmic.ps1` | Host | Yes | Enable "Guest Service Interface" on the VM (opens VMBus channel) |
+| `scripts/teardown-host-vmic.ps1` | Host | Yes | Disable "Guest Service Interface" on the VM |
+| `scripts/setup-guest-hvsocket.ps1` | Guest | Yes | Start vmicguestinterface + register the service GUID in the registry |
+| `scripts/teardown-guest-hvsocket.ps1` | Guest | Yes | Remove the service GUID registry key (+ optionally stop the service) |
+
+## Step 0 - Host: enable Guest Service Interface (one-time)
+
+On the **host** (elevated PowerShell), from the repo root:
 
 ```powershell
-# 1a. Start the Hyper-V guest service interface (backs AF_HYPERV sockets)
-Start-Service vmicguestinterface
-
-# 1b. Register the service GUID so AF_HYPERV bind() accepts it
-$key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3045196F-2A11-4D65-BCC7-3F9EAB09B7ED'
-New-Item -Path $key -Force | Out-Null
-Set-ItemProperty -Path $key -Name 'ElementName' -Value 'qwan-bootstrapd'
-
-# Verify
-Get-Service vmicguestinterface | Select-Object Name,Status
-Get-ItemProperty $key | Select-Object ElementName
+.\scripts\setup-host-vmic.ps1
+# or for a different VM:
+.\scripts\setup-host-vmic.ps1 -VmName "your-vm-name"
 ```
+
+This opens the VMBus channel. Without it, the guest's vmicguestinterface
+service cannot start and AF_HYPERV bind() will fail with WSAEACCES.
+
+## Step 1 - Guest: register service GUID + start service (one-time)
+
+On the **guest** (elevated PowerShell), from the repo root:
+
+```powershell
+.\scripts\setup-guest-hvsocket.ps1
+```
+
+This starts vmicguestinterface and registers the service GUID
+`3045196F-2A11-4D65-BCC7-3F9EAB09B7ED` so AF_HYPERV bind() accepts it.
 
 ## Step 2 - Guest: build qwan-bootstrapd
 
 In a normal (non-elevated) shell on the guest, from the qwanban workspace:
 
 ```powershell
-cd C:\Users\User\clients\cline\qwanban
 cargo build -p qwanban-stub --bin qwan-bootstrapd --release
 ```
 
@@ -115,13 +131,27 @@ Get-Content $env:TEMP\qwan-bootstrapd-work\manifest.json
 The pushed agent binary appears at `qwan-guest` and the manifest at
 `manifest.json` under the work dir.
 
+## Teardown
+
+When you're done with hvsocket integration testing:
+
+```powershell
+# Guest (elevated):
+.\scripts\teardown-guest-hvsocket.ps1              # remove service GUID
+.\scripts\teardown-guest-hvsocket.ps1 -StopService # also stop vmicguestinterface
+
+# Host (elevated):
+.\scripts\teardown-host-vmic.ps1                   # disable Guest Service Interface
+```
+
 ## Troubleshooting
 
 | Symptom | Cause / Fix |
 |---------|-------------|
-| `bind failed: WSAEADDRINUSE` | A previous qwan-bootstrapd is still bound. Kill it and retry. |
-| `bind failed: WSAEACCES` | Service GUID not registered in the guest registry (Step 1b). |
-| `connect failed: WSAECONNREFUSED` | qwan-bootstrapd not running in the guest, or `vmicguestinterface` stopped (Step 1a). |
-| `connect failed: WSAETIMEDOUT` | Wrong VM GUID, or the guest's integration services aren't enabled. |
+| Guest: `vmicguestinterface` won't start | Host hasn't enabled Guest Service Interface. Run `setup-host-vmic.ps1` on the host (Step 0). |
+| Guest: `bind failed: WSAEADDRINUSE` | A previous qwan-bootstrapd is still bound. Kill it and retry. |
+| Guest: `bind failed: WSAEACCES` | Service GUID not registered. Run `setup-guest-hvsocket.ps1` (Step 1). |
+| Host: `connect failed: WSAECONNREFUSED` | qwan-bootstrapd not running in the guest, or `vmicguestinterface` stopped. |
+| Host: `connect failed: WSAETIMEDOUT` | Wrong VM GUID, or the guest's integration services aren't enabled (Step 0). |
 | `auth rejected` | `--secret` mismatch between qwan-bootstrapd and harness. |
 | harness hangs after LAUNCH | The guest's `echo` command may use a different shell. Check `--work-dir` is writable. |
