@@ -73,12 +73,12 @@ Covers: `design.md` §5.1–5.4, §5.7. Implemented by `orch`, `hyperv`, `broker
 7.1.5  broker --> orch    : case_token (per-case bearer secret for guest auth)
 7.1.6  orch -> hyperv     : create_case_vm(case_id, base_vhd, caps, vswitch="qwan-internal")
 7.1.7  hyperv -> hyperv   : create differencing AVHDX on base parent
-7.1.8  hyperv -> hyperv   : define VM (vcpu/mem/dynamic-mem limits), attach NIC + hvsocket
-7.1.9  hyperv --> orch    : vm_handle{ vm_id, hvsocket_vmid }
+7.1.8  hyperv -> hyperv   : define VM (vcpu/mem/dynamic-mem limits), attach NIC to qwan-internal vSwitch
+7.1.9  hyperv --> orch    : vm_handle{ vm_id, guest_ip }
 7.1.10 orch -> hyperv     : start_vm(vm_id)
 7.1.11 hyperv ->> orch    : state=Booting
-7.1.12 orch ->* guest     : (over hvsocket) wait for bootstrap listener ready
-        note: base image ships only the tiny stable `qwan-stub` hvsocket loader (no SSH)
+7.1.12 orch ->* guest     : (over TCP) wait for bootstrap listener ready
+        note: base image ships only the tiny stable `qwan-stub` TCP loader (no SSH)
 7.1.13 orch -> guest      : push_agent(qwan-guest binary for OS/arch, sha256)   [§5.7]
 7.1.14 guest --> orch     : agent_pushed(ok, version)
 7.1.15 orch -> guest      : write_files(manifest.json, case_token, broker_endpoint, proxy_ca_fpr, dummy_keys)

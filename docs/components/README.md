@@ -11,8 +11,8 @@ together end-to-end.
 | Doc | Owns | Crate/artifact |
 |-----|------|----------------|
 | [`broker-protocol.md`](broker-protocol.md) | gRPC control plane, streams, framing, auth | `qwanban-broker` + generated stubs |
-| [`hyperv-driver.md`](hyperv-driver.md) | VM lifecycle, disks, networking, hvsocket, checkpoints | `qwanban-hyperv` |
-| [`stub-loader.md`](stub-loader.md) | hvsocket bootstrap loader baked into images (push/write/launch) | `qwan-stub` (baked) |
+| [`hyperv-driver.md`](hyperv-driver.md) | VM lifecycle, disks, networking, TCP, checkpoints | `qwanban-hyperv` |
+| [`stub-loader.md`](stub-loader.md) | TCP bootstrap loader baked into images (push/write/launch) | `qwan-stub` (baked) |
 | [`agent-lifecycle.md`](agent-lifecycle.md) | per-case push, file injection, launch, register, handoffs, teardown | `qwanban-guest` + `qwanban-core` |
 | [`mcp-server.md`](mcp-server.md) | qwan MCP tool surface exposed to Cline | `qwanban-guest` (mcp module) |
 | [`input-injection.md`](input-injection.md) | OS-level mouse/keyboard/window control | `qwanban-guest` (input module) |
@@ -81,8 +81,8 @@ cross-machine sync problem.
 
 - **Control plane:** gRPC (tonic) over the private vSwitch, TLS using the
   broker's server cert; guest authenticates every RPC with the **`case_token`**
-  (S4) in metadata `x-qwan-case-token`. Bootstrap (push/launch, pre-network)
-  uses **hvsocket** (see hyperv-driver + agent-lifecycle).
+  (S4) in metadata `x-qwan-case-token`. Bootstrap (push/launch) uses **plain
+  TCP** on the same private vSwitch (see hyperv-driver + agent-lifecycle).
 - **Bulk streams** (video segments, transcript batches) are client-streaming
   gRPC with application-level **acks + resume offsets** (at-least-once;
   receivers dedupe by `(case_id, segment_idx)` / `(case_id, seq)`).
@@ -158,7 +158,7 @@ To avoid two docs defining the same wire type differently, each shared type has
 | MCP tool schemas (qwan-only: `breadcrumb`,`clip`,`request_intervention`,`request_os_migration`,`finish`) | mcp-server |
 | Cline agent-loop adapter (drives Anthropic computer-use → `cuxec`) | agent-lifecycle |
 | `JobSpec`, `JobOutcome`, manifest, case state machine | agent-lifecycle (+ qwanban-core) |
-| VM handle, disk/network ops, hvsocket | hyperv-driver |
+| VM handle, disk/network ops, TCP | hyperv-driver |
 | inference route config, model allowlist | inference-router |
 | proxy allowlist, key-rewrite rules, audit record | mitm-proxy |
 

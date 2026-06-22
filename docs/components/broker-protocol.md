@@ -34,8 +34,8 @@ Owns broker-side of: **7.1.4–7.1.5**, **7.2.2–7.2.3, 7.2.9–7.2.10**,
 - **gRPC over TLS** (tonic + rustls), listening on the private vSwitch address
   (e.g. `https://10.0.75.1:7443`). Server cert is the broker's own cert; the
   guest pins it by SPKI fingerprint delivered in `manifest.json` (7.1.15).
-- Bootstrap RPCs that must run **before** guest networking (push/launch) are NOT
-  here — they go over hvsocket and are owned by hyperv-driver + agent-lifecycle.
+- Bootstrap RPCs (push/launch) are NOT here — they go over plain TCP on the
+  private vSwitch and are owned by hyperv-driver + agent-lifecycle.
 - Every RPC carries metadata `x-qwan-case-token` (S4) and `x-qwan-case-id`.
   Interceptor verifies token↔case binding before the handler runs; failure ⇒
   `Unauthenticated`.

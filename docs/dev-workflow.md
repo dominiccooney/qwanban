@@ -5,7 +5,7 @@
 We cannot run/develop directly on the Hyper-V **host**. Practical consequences:
 
 - **No live Hyper-V** during normal development. Anything that touches the real
-  hypervisor (`qwanban-hyperv`), real hvsocket, real Desktop Duplication / DXGI,
+  hypervisor (`qwanban-hyperv`), real TCP bootstrap, real Desktop Duplication / DXGI,
   real `SendInput`/`uinput`, or a real LM Studio is **integration-gated** behind
   `#[ignore]` + a `QWAN_HOST_TESTS=1` env guard, and is only exercised on a real
   host later.

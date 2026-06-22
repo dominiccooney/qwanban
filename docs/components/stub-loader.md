@@ -1,15 +1,15 @@
-# Component: hvsocket Stub Loader (`qwan-stub`, baked into base images)
+# Component: TCP Stub Loader (`qwan-stub`, baked into base images)
 
 > The single canonical mechanism for getting the per-case qwan agent + files into
-> a guest and launching it — over **Hyper-V sockets (hvsocket / AF_HYPERV)**, with
-> **no SSH and no guest networking** required. Read [`README.md`](README.md)
-> §S1–S8. Resolves design.md §15.3. Implements §5.7 (push, don't rebuild).
+> a guest and launching it — over **plain TCP on the private vSwitch**, with
+> **no SSH**. Read [`README.md`](README.md) §S1–S8. Resolves design.md §15.3.
+> Implements §5.7 (push, don't rebuild).
 
 ## Purpose & scope
 
 `qwan-stub` is a **tiny, stable, rarely-changing** executable the *maintainer*
 bakes into every base image (Windows and Linux). It is the only thing that must
-pre-exist in the image for bootstrap. At boot it listens on an hvsocket port and
+pre-exist in the image for bootstrap. At boot it listens on a TCP port and
 lets the host:
 
 1. **push** the current `qwan-guest` agent binary (+ any `manifest.agent.files`),
@@ -20,28 +20,28 @@ lets the host:
 It is deliberately minimal so it almost never needs to change — the frequently
 revved code is `qwan-guest`, which is *pushed* per case (§5.7), never baked.
 
-> **Decision (Q3): hvsocket stub loader only.** We do **not** set up SSH/sshd in
-> images (especially painful on Windows). One mechanism, both OSes, no guest
-> networking dependency, works before the vSwitch is configured.
+> **Decision (Q3): TCP stub loader only.** We do **not** set up SSH/sshd in
+> images (especially painful on Windows). One mechanism, both OSes, using plain
+> TCP over the private vSwitch.
 
 ## Sequence coverage
 
 Owns the `guest` side of **7.1.12–7.1.16** (bootstrap listener ready, push_agent,
 write_files, launch_agent) and the `agent_pushed` ack (7.1.14 / 7.1.E3). The host
-side of that protocol is owned by agent-lifecycle; the hvsocket *transport* by
+side of that protocol is owned by agent-lifecycle; the TCP *transport* by
 hyperv-driver.
 
 ## Dependencies
 
-- Host: hyperv-driver (`HvSocket` dialer), agent-lifecycle (the bootstrap
+- Host: hyperv-driver (`TcpStream` dialer), agent-lifecycle (the bootstrap
   protocol it speaks).
-- Guest: OS hvsocket support (see "Per-OS" below). No other runtime deps — a
+- Guest: OS TCP support. No other runtime deps — a
   single static binary with no dynamic libraries where possible.
 
 ## Lifecycle inside the guest
 
 ```
-boot ─► OS autostart runs qwan-stub ─► bind hvsocket(service GUID, port=STUB)
+boot ─► OS autostart runs qwan-stub ─► bind TCP(port=STUB) on guest vSwitch IP
      ─► accept ONE host connection (authenticated, see Security)
      ─► serve bootstrap protocol (PUSH_AGENT / WRITE_FILE / LAUNCH / STREAM)
      ─► on LAUNCH: spawn child (qwan-guest), relay stdio/exit
@@ -53,7 +53,7 @@ boot ─► OS autostart runs qwan-stub ─► bind hvsocket(service GUID, port=
   input-injection). Linux = a systemd unit (or init script) started early.
 - **Single-shot accept** then authenticated session; reject additional dialers.
 
-## Bootstrap protocol (over hvsocket)
+## Bootstrap protocol (over TCP)
 
 Length-prefixed frames (owned jointly with agent-lifecycle; this doc is the guest
 implementer):
@@ -74,24 +74,21 @@ EXIT         (server->host) { code }                    # child exit during boot
   the vSwitch, 7.2). The stub stays alive as a **fallback control channel** (e.g.
   to deliver stop/kill if the network path is wedged).
 
-## Per-OS hvsocket details
+## Per-OS TCP details
 
-- **Windows guest:** AF_HYPERV sockets via Winsock (`HV_PROTOCOL_RAW`,
-  `SOCKADDR_HV`). The **service GUID** must be registered in the guest registry
-  (`HKLM\...\GuestCommunicationServices\<GUID>`); the maintainer's image-build
-  bakes this in. No SSH, no extra services.
-- **Linux guest:** `AF_VSOCK` (Hyper-V Linux integration exposes vsock); bind the
-  well-known port. Requires the `hv_sock`/`vmw_vsock_*` modules present in the
-  image (standard in modern kernels).
-- The host dials the matching VM GUID + port (hyperv-driver `open_hvsocket`).
+- **Windows guest:** plain TCP via Winsock. Bind the well-known STUB port on the
+  guest's vSwitch IP. No special socket family, no service GUID registration.
+- **Linux guest:** plain TCP. Bind the well-known port on the guest's vSwitch IP.
+  Standard in any modern kernel.
+- The host dials the guest IP + port (hyperv-driver `open_stream`).
 
 ## Security
 
 - **No secrets baked in.** The stub ships with nothing sensitive. The host
   authenticates the session with a per-case `case_bootstrap_secret` the host
   delivers out-of-band at start — distinct from the broker `case_token`.
-- The stub only accepts the **host** (hvsocket is host↔guest only; not reachable
-  from the guest network or other VMs).
+- The stub only accepts the **host** (TCP on the private vSwitch is host↔guest
+  only; not reachable from other VMs or external networks).
 - Guest is untrusted anyway (fake keys, §13), so the threat model is modest:
   prevent a *different* host process from hijacking the channel, and verify
   pushed-binary integrity (sha256).
@@ -107,10 +104,10 @@ EXIT         (server->host) { code }                    # child exit during boot
 ## Interfaces
 
 - Guest binary `qwan-stub` (per OS/arch), plus the **image-build requirements**
-  the maintainer must satisfy: autostart entry + hvsocket service-GUID/vsock-port
-  registration + proxy CA trust + auto-login interactive session. Documented as
+  the maintainer must satisfy: autostart entry + TCP stub port + proxy CA trust
+  + auto-login interactive session. Documented as
   the **base-image contract** (future `base-image.md`).
-- Host: speaks the bootstrap protocol via hyperv-driver's `HvStream`.
+- Host: speaks the bootstrap protocol via hyperv-driver's `GuestStream`.
 
 ## Testing
 
@@ -125,9 +122,8 @@ EXIT         (server->host) { code }                    # child exit during boot
 
 ## Open items
 
-- Exact `case_bootstrap_secret` delivery (initial host-initiated hvsocket
-  handshake vs. a value injected via VM firmware/config). Must require no guest
-  networking.
+- Exact `case_bootstrap_secret` delivery (initial host-initiated TCP
+  handshake vs. a value injected via VM firmware/config).
 - Whether to fold the stub's fallback control channel into the broker's directive
   set or keep it bootstrap-only.
 - A `base-image.md` documenting the full maintainer image contract.

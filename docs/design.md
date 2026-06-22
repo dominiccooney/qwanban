@@ -208,14 +208,21 @@ To keep provisioning fast and ephemeral:
 ### 5.3 Host↔guest control channel
 
 Primary control uses the network channel (Broker over the private vSwitch).
-For robustness and bootstrap (before networking is up), qwanban also uses
-**Hyper-V sockets (hvsocket / AF_HYPERV)** — a host↔guest socket that does not
-depend on guest networking — to:
+The bootstrap data plane (push/launch) also runs over **plain TCP on the
+private vSwitch** — the same network the Broker uses. No Hyper-V sockets
+(AF_HYPERV) are used; that mechanism requires host admin elevation, which
+conflicts with the sandboxing goal. The TCP bootstrap channel is used to:
 
 - push/update the **qwan agent** (see §5.7) and inject the job manifest,
 - start the qwan agent + the Cline agent,
 - stream transcript/breadcrumbs out,
 - deliver stop/intervention signals.
+
+> **Elevation note:** VM **creation and destruction** (Hyper-V management APIs —
+> `New-VM`, `Remove-VM`, differencing disk creation, checkpoint/restore) still
+> require an **elevated** (admin) host process. The **TCP bootstrap data plane**
+> (push agent, write files, launch) does **not** — it is ordinary TCP over the
+> private vSwitch and needs no special privileges on the host.
 
 ### 5.4 Prompt injection & job handoff
 
@@ -267,13 +274,13 @@ images for every change is too slow, so the qwan agent is **deployed per case at
 runtime**, not baked into the image:
 
 1. The base image contains only the **`qwan-stub` loader** (a tiny, stable
-   hvsocket listener) plus the proxy CA trust. **No SSH** — the stub speaks an
-   hvsocket bootstrap protocol (Windows AF_HYPERV / Linux AF_VSOCK). See the
+   TCP listener) plus the proxy CA trust. **No SSH** — the stub speaks a
+   bootstrap protocol over plain TCP. See the
    [stub-loader component doc](components/stub-loader.md).
-2. At case start, the host connects to `qwan-stub` over hvsocket and **pushes the
+2. At case start, the host connects to `qwan-stub` over TCP and **pushes the
    current qwan agent build** (a self-contained binary + the qwan MCP) plus the
-   manifest/token/CA, then **launches** it — all over the same hvsocket channel,
-   no guest networking required.
+   manifest/token/CA, then **launches** it — all over the same TCP channel on
+   the private vSwitch.
 3. Because the agent is a single static Rust binary per OS/arch, the push is
    small and fast; iterating qwan is just "rebuild binary → next case picks it
    up." No image rebuild required. (The stub is stable and changes ~never; on the
@@ -313,7 +320,7 @@ watchdog timer enforces `max_runtime`.
 ### 6.1 Continuous recording
 
 - The **qwan agent** continuously captures the guest display and streams it to
-  the host (over the private vSwitch / hvsocket).
+  the host (over the private vSwitch / TCP).
 - **Compression can happen either in the guest or on the host — whichever is
   easier.** We don't treat the guest's media as security-sensitive (a malicious
   guest can already lie about anything it shows), so there is no hard requirement
@@ -589,8 +596,8 @@ the qwan agent has launched the Cline agent and the qwan MCP is connected.)
 | In-guest tester | **Cline** (Cline SDK / CLI / extension) |
 | In-guest companion | **qwan agent** (`qwanban-guest`) + **qwan MCP** (computer control, breadcrumbs, clips, handoffs) |
 | Hypervisor | Hyper-V (WMI v2 / PowerShell module) |
-| Host↔guest bootstrap | Hyper-V sockets (hvsocket / AF_HYPERV) |
-| qwan agent delivery | per-case push over **hvsocket** via the baked-in `qwan-stub` loader (no SSH) — no image rebuild |
+| Host↔guest bootstrap | plain TCP over the private vSwitch (no Hyper-V sockets) |
+| qwan agent delivery | per-case push over **TCP** via the baked-in `qwan-stub` loader (no SSH) — no image rebuild |
 | Broker transport | gRPC or HTTP/2 over private vSwitch |
 | MITM proxy | `hudsucker` + `rcgen` CA |
 | Inference | LM Studio (OpenAI-compatible) + cloud, via `qwanban-inference` |
@@ -622,11 +629,10 @@ concern**; resource caps = **host config**. Remaining:
    `QWAN_MCP_ADDR`/`QWAN_CUXEC_ADDR` injected via env. Whatever that command
    starts (patched Cline CLI, SDK harness, script) is the maintainer's choice.
    See `components/agent-lifecycle.md` (`manifest.agent`).
-3. ~~**qwan agent push mechanics.**~~ **DECIDED:** an **hvsocket stub loader**
+3. ~~**qwan agent push mechanics.**~~ **DECIDED:** a **TCP stub loader**
    (`qwan-stub`) baked into every base image — **no SSH** (avoids OpenSSH setup
-   on Windows). The host pushes the agent + files and launches over hvsocket
-   (Windows AF_HYPERV / Linux AF_VSOCK), no guest networking required. See
-   `components/stub-loader.md`.
+   on Windows). The host pushes the agent + files and launches over **plain TCP
+   on the private vSwitch**. See `components/stub-loader.md`.
 4. ~~**Windows guest input automation (UIA vs. vision).**~~ **DECIDED: vision.**
    qwanban provides only screenshots + coordinate input (the Anthropic
    computer-use surface). There is **no host-side accessibility/automation-tree
@@ -652,7 +658,7 @@ concern**; resource caps = **host config**. Remaining:
 
 - **M0 — Skeleton:** `qwanban-core` + CLI + Hyper-V clone/start/stop/destroy
   from maintainer-supplied VHDX paths; host resource caps.
-- **M1 — Channel + push:** hvsocket bootstrap, **per-case qwan agent push**
+- **M1 — Channel + push:** TCP bootstrap, **per-case qwan agent push**
   (§5.7), prompt injection, transcript streaming.
 - **M2 — qwan agent + qwan MCP:** breadcrumbs, handoffs, and **computer-control**
   MCP tools; wire up the **Cline agent** to run a task using the MCP.

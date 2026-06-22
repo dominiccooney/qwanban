@@ -24,7 +24,7 @@ Key properties:
   compressed in the guest or on the host — whichever is easier.
 - GPU-less guests make **inference** requests via the host (LM Studio / cloud).
 - **Base images** are maintainer-built VHD/VHDX files registered by **file
-  path**. The qwan agent is **pushed per-case over hvsocket** (via a tiny
+  path**. The qwan agent is **pushed per-case over TCP** (via a tiny
   baked-in `qwan-stub` loader; no SSH) so it can be revved without rebuilding
   images.
 - Guests hold only **dummy keys** (real-looking, unique strings — so the agent can

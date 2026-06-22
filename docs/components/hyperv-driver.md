@@ -1,6 +1,6 @@
 # Component: Hyper-V Driver (`qwanban-hyperv`)
 
-> Owns the host↔hypervisor surface: VM lifecycle, disks, networking, hvsocket
+> Owns the host↔hypervisor surface: VM lifecycle, disks, networking, TCP
 > bootstrap channel, and checkpoints. Read [`README.md`](README.md) §S1–S8.
 > Implements design.md §5.1–5.3, §5.5–5.6.
 
@@ -8,15 +8,15 @@
 
 A safe, async Rust wrapper over Hyper-V that the orchestrator uses to create,
 boot, hold, migrate, and destroy ephemeral case VMs cloned from
-maintainer-supplied VHD/VHDX files. Also owns the **hvsocket** transport used for
-pre-network bootstrap (push + launch in 7.1).
+maintainer-supplied VHD/VHDX files. Also owns the **TCP** transport used for
+bootstrap (push + launch in 7.1) over the private vSwitch.
 
 This component does **not** know about jobs, manifests, or agents — it operates
 on VMs and disks. `qwanban-core`/agent-lifecycle layer those on top.
 
 ## Sequence coverage
 
-Owns: **7.1.6–7.1.12** (create/define/start/await-bootstrap), the hvsocket
+Owns: **7.1.6–7.1.12** (create/define/start/await-bootstrap), the TCP
 transport under **7.1.13–7.1.16**, **7.1.E1–E2**, **7.10.5** (checkpoint),
 **7.11.6, 7.11.10** (sibling VM create / old VM destroy), **7.12.8–7.12.9**
 (stop/destroy/checkpoint).
@@ -25,7 +25,7 @@ transport under **7.1.13–7.1.16**, **7.1.E1–E2**, **7.10.5** (checkpoint),
 
 - Upstream: none (lowest layer). Consumes `qwanban.toml` image registry +
   `ResourceCaps`.
-- Downstream: `qwanban-core` (orch), agent-lifecycle (uses the hvsocket channel).
+- Downstream: `qwanban-core` (orch), agent-lifecycle (uses the TCP channel).
 
 ## Backend strategy
 
@@ -62,17 +62,18 @@ fall back to `powershell` per-operation if a WMI call is unimplemented.
 - DHCP/static: driver assigns the guest a static lease (or injects IP via the
   bootstrap files) so the broker endpoint is reachable immediately.
 
-## hvsocket bootstrap channel
+## TCP bootstrap channel
 
-- Owns an `HvSocket` listener/dialer (`AF_HYPERV`) keyed by the VM's GUID — works
-  before guest networking is up (S3).
+- Owns a `TcpStream` dialer that connects to the guest's IP on the private
+  vSwitch — no Hyper-V sockets (AF_HYPERV) required, avoiding host admin
+  elevation.
 - Exposes a byte-stream + simple length-prefixed framing used by agent-lifecycle
   to implement `push_agent`, `write_files`, `launch_agent` (7.1.13–7.1.16). The
   *protocol* over this channel is owned by agent-lifecycle / stub-loader; the
   *transport* is owned here.
 - The in-guest peer is the **`qwan-stub` loader** baked into every base image
-  (see [`stub-loader.md`](stub-loader.md)). **No SSH** — Windows uses AF_HYPERV,
-  Linux uses AF_VSOCK; the driver dials the matching VM GUID + well-known port.
+  (see [`stub-loader.md`](stub-loader.md)). **No SSH** — the driver dials the
+  guest's vSwitch IP + well-known port.
 
 ## Driver trait (interface)
 
@@ -83,7 +84,7 @@ pub trait HyperVDriver: Send + Sync {
     async fn create_case_vm(&self, spec: VmSpec) -> Result<VmHandle>;     // 7.1.6-7.1.8
     async fn start_vm(&self, vm: &VmHandle) -> Result<()>;                // 7.1.10
     async fn await_state(&self, vm: &VmHandle, s: VmState, t: Duration) -> Result<()>; // 7.1.11
-    async fn open_hvsocket(&self, vm: &VmHandle, port: u32) -> Result<HvStream>; // 7.1.12
+    async fn open_stream(&self, vm: &VmHandle, port: u32) -> Result<GuestStream>; // 7.1.12
     async fn checkpoint(&self, vm: &VmHandle, name: &str) -> Result<CheckpointId>; // 7.10.5
     async fn stop_vm(&self, vm: &VmHandle, mode: StopMode) -> Result<()>; // 7.12.8
     async fn destroy_case_vm(&self, vm: &VmHandle) -> Result<()>;         // delete VM + AVHDX
@@ -97,7 +98,7 @@ pub struct VmSpec {
     pub switch: String,            // "qwan-internal"
     pub firewall: FirewallPolicy,  // allowed host ports
 }
-pub struct VmHandle { pub vm_id: String, pub hvsocket_vmid: Uuid, pub avhdx: PathBuf }
+pub struct VmHandle { pub vm_id: String, pub guest_ip: IpAddr, pub avhdx: PathBuf }
 pub enum VmState { Defined, Booting, Running, Saved, Off, Error(String) }
 ```
 
@@ -117,7 +118,7 @@ maximum for dynamic memory), and AVHDX size. A **host watchdog** (owned by
 
 - **Unit (mocked WMI/PowerShell):** command construction for create/caps/destroy.
 - **Integration (requires Hyper-V host, gated `#[ignore]`):** full
-  create→start→hvsocket-echo→destroy on a tiny Linux test image; assert AVHDX
+  create→start→TCP-echo→destroy on a tiny Linux test image; assert AVHDX
   created then deleted, parent untouched.
 - **Firewall test:** from inside a test guest, assert broker/proxy reachable and
   an arbitrary external host blocked.
@@ -125,5 +126,4 @@ maximum for dynamic memory), and AVHDX size. A **host watchdog** (owned by
 
 ## Open items
 
-- Exact hvsocket service GUID registration for Windows vs. Linux guests.
 - Whether to pre-warm a pool of booted VMs per image for latency (post-v1).

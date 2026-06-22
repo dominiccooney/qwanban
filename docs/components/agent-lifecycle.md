@@ -12,7 +12,7 @@ Two halves of one lifecycle:
 
 - **Host side (`qwanban-core`):** the case state machine, the manifest builder,
   and the bootstrap orchestration (push → write files → launch) over the
-  hvsocket transport (from hyperv-driver).
+  TCP transport (from hyperv-driver).
 - **Guest side (`qwanban-guest` main):** the qwan agent's boot path — read
   manifest, register with broker, start subsystems (MCP, capture, transcript),
   spawn and supervise the Cline agent, route handoffs and the final result.
@@ -23,14 +23,14 @@ broker.
 
 ## Sequence coverage
 
-Owns: the **protocol** over hvsocket in **7.1.13–7.1.16** (push/write/launch),
+Owns: the **protocol** over TCP in **7.1.13–7.1.16** (push/write/launch),
 **7.2.1, 7.2.4–7.2.6** (boot + spawn Cline), **7.2.9 producer**, the guest side
 of **7.10.1–7.10.3 / 7.11.1–7.11.4** (handoff plumbing), **7.12.1–7.12.3**
 (finalize/flush), and the host state transitions **7.1.17, 7.12.7**.
 
 ## Dependencies
 
-- Host: hyperv-driver (hvsocket transport, VM ops), broker-protocol (OpenCase,
+- Host: hyperv-driver (TCP transport, VM ops), broker-protocol (OpenCase,
   transitions).
 - Guest: broker-protocol client, mcp-server, video-capture-encode,
   breadcrumbs-transcript (started as subsystems).
@@ -91,7 +91,7 @@ Secrets rule (S7): the manifest contains only **dummy** keys + the case_token
 
 ## Host: bootstrap orchestration (7.1.13–7.1.16)
 
-Over the **hvsocket** channel (the only bootstrap transport — see
+Over the **TCP** channel (the only bootstrap transport — see
 [`stub-loader.md`](stub-loader.md); no SSH), `qwanban-core` speaks the bootstrap
 protocol to the in-image `qwan-stub`:
 
@@ -106,9 +106,10 @@ LAUNCH { command, shell, env, cwd }                -> ACK{pid}   // starts qwan-
   `os/arch`; the stub verifies sha256 after transfer (7.1.14 / 7.1.E3). Retries N
   times then `Error`. This is the §5.7 "push, don't rebuild" path; binaries are
   small static Rust executables.
-- **One transport, both OSes:** bootstrap is always hvsocket via `qwan-stub`
-  (Windows AF_HYPERV / Linux AF_VSOCK). The protocol framing here is shared with
-  stub-loader.md (that doc is the guest-side implementer).
+- **One transport, both OSes:** bootstrap is always TCP via `qwan-stub`
+  (plain TCP on the private vSwitch, same for Windows and Linux). The protocol
+  framing here is shared with stub-loader.md (that doc is the guest-side
+  implementer).
 
 ## Guest: boot path (7.2.1–7.2.6)
 
