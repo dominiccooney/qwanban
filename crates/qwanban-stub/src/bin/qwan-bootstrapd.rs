@@ -1,9 +1,9 @@
-//! `qwanban-stubd` — the real hvsocket stub daemon. Binds an AF_HYPERV listener
-//! on a service GUID inside the guest VM, accepts host connections, and runs
-//! the bootstrap `serve()` loop on each.
+//! `qwan-bootstrapd` - the real hvsocket stub-loader daemon. Binds an AF_HYPERV
+//! listener on a service GUID inside the guest VM, accepts host connections,
+//! and runs the bootstrap `serve()` loop on each.
 //!
 //! Usage:
-//!   qwanban-stubd --service-guid <GUID> --work-dir <DIR> --secret <SECRET>
+//!   qwan-bootstrapd --service-guid <GUID> --work-dir <DIR> --secret <SECRET>
 //!
 //! Run this inside the guest VM (the one being driven by the host harness).
 //! It stays up and persistent, accepting one connection at a time.
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     std::fs::create_dir_all(&work_dir)?;
-    tracing::info!(%service_guid, ?work_dir, "qwanban-stubd binding hvsocket listener");
+    tracing::info!(%service_guid, ?work_dir, "qwan-bootstrapd binding hvsocket listener");
 
     let listener = HvSocketListener::bind(&service_guid).map_err(|e| {
         anyhow::anyhow!("hvsocket bind failed (is vmicguestinterface running + service GUID registered?): {e}")

@@ -1,8 +1,9 @@
-# Real hvsocket Integration Test — Runbook
+# Real hvsocket Integration Test - Runbook
 
 This runbook drives a **real** AF_HYPERV hvsocket bootstrap handshake between
-the host and a guest VM running `qwanban-stubd`. No mocks — real sockets, real
-file pushes, a real launched process.
+the host and a guest VM running `qwan-bootstrapd` (the production stub loader,
+packaged as a daemon). No mocks - real sockets, real file pushes, a real
+launched process.
 
 The guest VM in this dev environment is the target. Its VM GUID is:
 
@@ -20,16 +21,16 @@ The fixed service GUID the stub listens on:
 
 ```
 HOST (your machine)                         GUEST (this dev VM, persistent)
-┌──────────────────────┐                   ┌──────────────────────────┐
-│  host-harness binary │ ──AF_HYPERV──────►│  qwanban-stubd (running) │
-│  connect_hvsocket()  │   (vm_guid +      │  HvSocketListener::bind  │
-│  drives HELLO/AUTH/  │    service_guid)  │  serve() per connection   │
-│  PUSH/WriteFile/     │                   │  writes real files,      │
-│  LAUNCH/STREAM/Exit  │ ◄──response──────│  launches real process   │
-└──────────────────────┘                   └──────────────────────────┘
++----------------------+                   +--------------------------+
+|  host-harness binary | --AF_HYPERV----->|  qwan-bootstrapd (run)   |
+|  connect_hvsocket()  |   (vm_guid +      |  HvSocketListener::bind  |
+|  drives HELLO/AUTH/  |    service_guid)  |  serve() per connection   |
+|  PUSH/WriteFile/     |                   |  writes real files,      |
+|  LAUNCH/STREAM/Exit  | <---response-----|  launches real process   |
++----------------------+                   +--------------------------+
 ```
 
-## Step 1 — Guest: one-time prerequisites (elevated, on the guest VM)
+## Step 1 - Guest: one-time prerequisites (elevated, on the guest VM)
 
 These need admin. Run in an **elevated** PowerShell on the guest VM:
 
@@ -40,28 +41,28 @@ Start-Service vmicguestinterface
 # 1b. Register the service GUID so AF_HYPERV bind() accepts it
 $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3045196F-2A11-4D65-BCC7-3F9EAB09B7ED'
 New-Item -Path $key -Force | Out-Null
-Set-ItemProperty -Path $key -Name 'ElementName' -Value 'qwanban-stubd'
+Set-ItemProperty -Path $key -Name 'ElementName' -Value 'qwan-bootstrapd'
 
 # Verify
 Get-Service vmicguestinterface | Select-Object Name,Status
 Get-ItemProperty $key | Select-Object ElementName
 ```
 
-## Step 2 — Guest: build qwanban-stubd
+## Step 2 - Guest: build qwan-bootstrapd
 
 In a normal (non-elevated) shell on the guest, from the qwanban workspace:
 
 ```powershell
 cd C:\Users\User\clients\cline\qwanban
-cargo build -p qwanban-stub --bin stubd --release
+cargo build -p qwanban-stub --bin qwan-bootstrapd --release
 ```
 
-## Step 3 — Guest: start qwanban-stubd (persistent)
+## Step 3 - Guest: start qwan-bootstrapd (persistent)
 
 ```powershell
-$workDir = "$env:TEMP\qwan-stubd-work"
+$workDir = "$env:TEMP\qwan-bootstrapd-work"
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
-.\target\release\stubd.exe `
+.\target\release\qwan-bootstrapd.exe `
   --service-guid 3045196F-2A11-4D65-BCC7-3F9EAB09B7ED `
   --work-dir $workDir `
   --secret bootstrap-secret
@@ -71,7 +72,7 @@ Leave this running. It logs `listening; waiting for host connection...` and
 stays up, accepting connections one at a time. **I will keep this process
 running so you can iterate.**
 
-## Step 4 — Host: build host-harness
+## Step 4 - Host: build host-harness
 
 On the host machine, from the qwanban workspace:
 
@@ -79,7 +80,7 @@ On the host machine, from the qwanban workspace:
 cargo build -p qwanban-integration --bin host-harness --release
 ```
 
-## Step 5 — Host: run the harness against the guest
+## Step 5 - Host: run the harness against the guest
 
 ```powershell
 .\target\release\host-harness.exe `
@@ -107,8 +108,8 @@ Expected output on success:
 After a successful run, inspect what the stub wrote to disk:
 
 ```powershell
-Get-ChildItem $env:TEMP\qwan-stubd-work -Recurse | Select-Object FullName,Length
-Get-Content $env:TEMP\qwan-stubd-work\manifest.json
+Get-ChildItem $env:TEMP\qwan-bootstrapd-work -Recurse | Select-Object FullName,Length
+Get-Content $env:TEMP\qwan-bootstrapd-work\manifest.json
 ```
 
 The pushed agent binary appears at `qwan-guest` and the manifest at
@@ -118,9 +119,9 @@ The pushed agent binary appears at `qwan-guest` and the manifest at
 
 | Symptom | Cause / Fix |
 |---------|-------------|
-| `bind failed: WSAEADDRINUSE` | A previous stubd is still bound. Kill it and retry. |
+| `bind failed: WSAEADDRINUSE` | A previous qwan-bootstrapd is still bound. Kill it and retry. |
 | `bind failed: WSAEACCES` | Service GUID not registered in the guest registry (Step 1b). |
-| `connect failed: WSAECONNREFUSED` | stubd not running in the guest, or `vmicguestinterface` stopped (Step 1a). |
+| `connect failed: WSAECONNREFUSED` | qwan-bootstrapd not running in the guest, or `vmicguestinterface` stopped (Step 1a). |
 | `connect failed: WSAETIMEDOUT` | Wrong VM GUID, or the guest's integration services aren't enabled. |
-| `auth rejected` | `--secret` mismatch between stubd and harness. |
+| `auth rejected` | `--secret` mismatch between qwan-bootstrapd and harness. |
 | harness hangs after LAUNCH | The guest's `echo` command may use a different shell. Check `--work-dir` is writable. |
