@@ -17,7 +17,6 @@ struct SockaddrHv {
     reserved: u16,
     vm_id: [u8; 16],
     service_id: [u8; 16],
-    reserved2: [u8; 4],
 }
 
 const GUID_ZERO: [u8; 16] = [0; 16];
@@ -82,13 +81,13 @@ impl HvSocketListener {
             if s == INVALID_SOCKET { return Err(last_wsa_error()); }
             let addr = SockaddrHv {
                 family: AF_HYPERV, reserved: 0,
-                vm_id: GUID_ZERO, service_id, reserved2: [0; 4],
+                vm_id: GUID_ZERO, service_id,
             };
             if bind(s, &addr as *const _ as *const _, std::mem::size_of::<SockaddrHv>() as i32) == SOCKET_ERROR {
-                closesocket(s); return Err(last_wsa_error());
+                let e = last_wsa_error(); closesocket(s); return Err(e);
             }
             if listen(s, 1) == SOCKET_ERROR {
-                closesocket(s); return Err(last_wsa_error());
+                let e = last_wsa_error(); closesocket(s); return Err(e);
             }
             Ok(HvSocketListener { sock: s as RawSocket })
         }
@@ -121,10 +120,10 @@ pub fn connect_hvsocket(vm_guid: &str, service_guid: &str) -> io::Result<HvRawSt
         if s == INVALID_SOCKET { return Err(last_wsa_error()); }
         let addr = SockaddrHv {
             family: AF_HYPERV, reserved: 0,
-            vm_id, service_id, reserved2: [0; 4],
+            vm_id, service_id,
         };
         if connect(s, &addr as *const _ as *const _, std::mem::size_of::<SockaddrHv>() as i32) == SOCKET_ERROR {
-            closesocket(s); return Err(last_wsa_error());
+            let e = last_wsa_error(); closesocket(s); return Err(e);
         }
         set_nonblocking(s)?;
         Ok(HvRawStream { sock: s })
