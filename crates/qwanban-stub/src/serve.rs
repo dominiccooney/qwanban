@@ -134,7 +134,12 @@ async fn spawn_and_relay<S: tokio::io::AsyncWrite + Unpin>(
         c.arg("-c").arg(&l.command);
         c
     };
-    cmd.current_dir(if l.cwd.is_empty() { work_dir } else { std::path::Path::new(&l.cwd) });
+    cmd.current_dir(if l.cwd.is_empty() {
+        work_dir
+    } else {
+        let p = std::path::Path::new(&l.cwd);
+        if p.exists() { p } else { work_dir }
+    });
     for (k, v) in &l.env {
         cmd.env(k, v);
     }

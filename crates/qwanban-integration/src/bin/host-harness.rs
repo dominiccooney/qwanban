@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     let mut secret = String::new();
     let mut stub_version: u32 = 1;
     let mut agent_path = std::path::PathBuf::from("./fake-agent");
-    let mut work_dir = std::path::PathBuf::from("./qwan-harness-work");
+    let mut work_dir = std::path::PathBuf::from(".");
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
