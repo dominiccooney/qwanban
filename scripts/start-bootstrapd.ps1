@@ -1,22 +1,24 @@
 <#
 .SYNOPSIS
-  Launch qwan-bootstrapd persistently in the background (guest-side).
+  Launch qwan-bootstrapd persistently in the background (guest-side, TCP).
 .DESCRIPTION
-  Starts the hvsocket stub-loader daemon bound to the qwanban service GUID.
-  It runs hidden in the background and stays up, accepting host connections.
+  Starts the TCP stub-loader daemon. Binds a TCP port on the private vSwitch
+  and stays up, accepting host connections one at a time.
   Stop with stop-bootstrapd.ps1.
+.PARAMETER BindAddr
+  The bind address. Default: 0.0.0.0:7474
 .PARAMETER WorkDir
   Where the stub writes pushed files + launches processes. Default: TEMP.
 .PARAMETER Secret
   The bootstrap secret the host must present. Default: bootstrap-secret.
 #>
 param(
+    [string]$BindAddr = '0.0.0.0:7474',
     [string]$WorkDir = "$env:TEMP\qwan-bootstrapd-work",
     [string]$Secret = 'bootstrap-secret'
 )
 $ErrorActionPreference = 'Stop'
 
-$ServiceGuid = '3045196F-2A11-4D65-BCC7-3F9EAB09B7ED'
 $Exe = "$PSScriptRoot\..\target\debug\qwan-bootstrapd.exe"
 
 if (-not (Test-Path $Exe)) {
@@ -31,15 +33,13 @@ New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 Get-Process qwan-bootstrapd -ErrorAction SilentlyContinue | Stop-Process -Force
 
 Write-Host "Starting qwan-bootstrapd ..."
-Write-Host "  Exe:         $Exe"
-Write-Host "  WorkDir:     $WorkDir"
-Write-Host "  ServiceGUID: $ServiceGuid"
+Write-Host "  BindAddr:  $BindAddr"
+Write-Host "  WorkDir:   $WorkDir"
+Write-Host "  Secret:    $Secret"
 
-# Start hidden, no redirect (avoids pipe-handle blocking). Tracing output is
-# discarded; the daemon blocks on accept() and stays alive.
 $env:RUST_LOG = 'qwanban=info'
 $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--service-guid', $ServiceGuid,
+    '--bind', $BindAddr,
     '--work-dir', $WorkDir,
     '--secret', $Secret
 ) -WindowStyle Hidden -PassThru
@@ -50,5 +50,5 @@ if ($proc.HasExited) {
     exit 1
 }
 
-Write-Host "Started (PID $($proc.Id)). Listening for host connections." -ForegroundColor Green
+Write-Host "Started (PID $($proc.Id)). Listening on $BindAddr." -ForegroundColor Green
 Write-Host "Stop with: .\scripts\stop-bootstrapd.ps1"

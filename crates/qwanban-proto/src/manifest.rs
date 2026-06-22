@@ -1,6 +1,6 @@
-//! The per-case manifest (§agent-lifecycle). Written by `qwanban-core`, pushed
-//! into the guest by `qwan-stub` over hvsocket. Contains only **dummy** keys +
-//! the case_token (worthless off-host); real keys never appear (§S7).
+//! The per-case manifest (agent-lifecycle). Written by `qwanban-core`, pushed
+//! into the guest by `qwan-stub` over TCP. Contains only **dummy** keys +
+//! the case_token (worthless off-host); real keys never appear (S7).
 
 use crate::id::{CaseId, JobId};
 use serde::{Deserialize, Serialize};

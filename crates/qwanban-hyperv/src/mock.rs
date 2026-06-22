@@ -1,8 +1,8 @@
-//! `MockHyperVDriver` — an in-memory `HyperVDriver` for dev-VM testing. Tracks
-//! VMs by id with their state; `open_hvsocket` returns a tokio duplex so the
+//! `MockHyperVDriver` - an in-memory `HyperVDriver` for dev-VM testing. Tracks
+//! VMs by id with their state; `open_stream` returns a tokio duplex so the
 //! stub codec can be exercised against it. No real Hyper-V involved.
 
-use crate::{HyperVDriver, HvStream, VmHandle, VmSpec, VmState};
+use crate::{GuestStream, HyperVDriver, VmHandle, VmSpec, VmState};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use qwanban_proto::id::{CheckpointId, VmId};
@@ -14,10 +14,10 @@ struct MockVm {
     #[allow(dead_code)]
     case_id: qwanban_proto::id::CaseId,
     state: VmState,
-    /// The stub's end of the hvsocket duplex, stashed when `open_hvsocket`
+    /// The stub's end of the stream duplex, stashed when `open_stream`
     /// creates the pair. A test retrieves it via `take_stub_stream` and runs
     /// `serve()` on it (simulating the in-guest stub). `None` once taken or if
-    /// no hvsocket has been opened yet.
+    /// no stream has been opened yet.
     stub_side: Option<tokio::io::DuplexStream>,
 }
 
@@ -35,8 +35,8 @@ impl MockHyperVDriver {
         }
     }
 
-    /// Retrieve the stub's end of the hvsocket stream for a VM (the end
-    /// `serve()` should run on). Returns `None` if `open_hvsocket` hasn't been
+    /// Retrieve the stub's end of the stream for a VM (the end
+    /// `serve()` should run on). Returns `None` if `open_stream` hasn't been
     /// called yet, or if it was already taken. This is the seam integration
     /// tests use to drive the in-guest stub in-process.
     pub fn take_stub_stream(&self, vm_id: &VmId) -> Option<tokio::io::DuplexStream> {
@@ -90,7 +90,7 @@ impl HyperVDriver for MockHyperVDriver {
         Ok(())
     }
 
-    async fn open_hvsocket(&self, vm: &VmHandle, _port: u32) -> QwanResult<Box<dyn HvStream>> {
+    async fn open_stream(&self, vm: &VmHandle, _port: u32) -> QwanResult<Box<dyn GuestStream>> {
         let mut g = self.vms.lock();
         let entry = g.get_mut(&vm.vm_id).ok_or_else(|| qwanban_proto::not_found("vm not found"))?;
         // Create a duplex pair: the host (orchestrator) gets one end, the stub
@@ -153,10 +153,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_hvsocket_returns_duplex_stream() {
+    async fn open_stream_returns_duplex_stream() {
         let d = MockHyperVDriver::new();
         let vm = d.create_case_vm(spec()).await.unwrap();
-        let mut stream = d.open_hvsocket(&vm, 9999).await.unwrap();
+        let mut stream = d.open_stream(&vm, 9999).await.unwrap();
         use tokio::io::AsyncWriteExt;
         stream.write_all(b"hello stub").await.unwrap();
     }

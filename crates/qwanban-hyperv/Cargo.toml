@@ -1,6 +1,6 @@
 [package]
 name = "qwanban-hyperv"
-description = "Hyper-V driver: VM lifecycle, disks, networking, hvsocket, checkpoints"
+description = "Hyper-V driver: VM lifecycle, disks, networking, TCP bootstrap, checkpoints"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,9 @@ qwanban-proto.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net"] }
+tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 parking_lot.workspace = true
-windows-sys.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }

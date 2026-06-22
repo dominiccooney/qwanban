@@ -1,12 +1,10 @@
-//! `qwanban-hyperv` — Hyper-V driver (§hyperv-driver). Owns VM lifecycle, disks,
-//! networking, hvsocket transport, checkpoints. **Host-only; gated tests.**
+//! `qwanban-hyperv` - Hyper-V driver (hyperv-driver). Owns VM lifecycle, disks,
+//! networking, TCP bootstrap channel, checkpoints. **Host-only; gated tests.**
 //!
 //! The `HyperVDriver` trait is the seam: a mock impl lets `qwanban-core` and the
 //! broker integration harness run in the dev VM with no Hyper-V.
 
 pub mod mock;
-#[cfg(windows)]
-pub mod hvsocket;
 
 use async_trait::async_trait;
 use qwanban_proto::{QwanResult, config::ResourceCaps, id::{CaseId, CheckpointId, VmId}};
@@ -42,8 +40,8 @@ pub trait HyperVDriver: Send + Sync {
     async fn create_case_vm(&self, spec: VmSpec) -> QwanResult<VmHandle>;
     async fn start_vm(&self, vm: &VmHandle) -> QwanResult<()>;
     async fn await_state(&self, vm: &VmHandle, state: VmState, timeout: std::time::Duration) -> QwanResult<()>;
-    /// Open an hvsocket byte stream to the guest's `qwan-stub` (§stub-loader).
-    async fn open_hvsocket(&self, vm: &VmHandle, port: u32) -> QwanResult<Box<dyn HvStream>>;
+    /// Open a TCP byte stream to the guest's `qwan-stub` (stub-loader).
+    async fn open_stream(&self, vm: &VmHandle, port: u32) -> QwanResult<Box<dyn GuestStream>>;
     async fn checkpoint(&self, vm: &VmHandle, name: &str) -> QwanResult<CheckpointId>;
     async fn stop_vm(&self, vm: &VmHandle) -> QwanResult<()>;
     async fn destroy_case_vm(&self, vm: &VmHandle) -> QwanResult<()>;
@@ -51,9 +49,9 @@ pub trait HyperVDriver: Send + Sync {
     async fn live_vm_count(&self) -> QwanResult<u32>;
 }
 
-/// A byte-stream over hvsocket to the guest stub.
-pub trait HvStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+/// A byte-stream over TCP to the guest stub.
+pub trait GuestStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized> HvStream for T {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized> GuestStream for T {}
 
 pub use mock::MockHyperVDriver;

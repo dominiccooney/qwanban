@@ -1,13 +1,14 @@
-//! Integration test: orchestrator → driver → stub.
+//! Integration test: orchestrator -> driver -> stub.
 //!
 //! The LocalOrchestrator creates + starts a VM via MockHyperVDriver. Then we
-//! manually open the hvsocket (the seam the orchestrator's bootstrap step will
-//! use once wired) and run the HELLO/AUTH handshake against the in-guest stub,
-//! proving the orchestrator's VM lifecycle composes with the stub transport.
+//! manually open the TCP stream (the seam the orchestrator's bootstrap step
+//! will use once wired) and run the HELLO/AUTH handshake against the in-guest
+//! stub, proving the orchestrator's VM lifecycle composes with the stub
+//! transport.
 //!
-//! This is the closest we get to the real 7.1→7.2 sequence without a VM: the
+//! This is the closest we get to the real 7.1->7.2 sequence without a VM: the
 //! orchestrator admits + provisions + boots, then the bootstrap handshake runs
-//! over the driver's hvsocket to the stub's serve().
+//! over the driver's stream to the stub's serve().
 
 use qwanban_core::job::{JobKind, JobSpec};
 use qwanban_core::orchestrator::OrchestratorConfig;
@@ -60,8 +61,8 @@ async fn orchestrator_provisions_vm_then_bootstrap_handshake_works() {
 
     // 2. The orchestrator created a VM internally; we don't have its VmHandle,
     //    so for this integration test we create a *second* VM via the same
-    //    driver to exercise the hvsocket→stub seam. (The real orchestrator
-    //    will open hvsocket on the VM it created; here we prove the seam works
+    //    driver to exercise the stream->stub seam. (The real orchestrator
+    //    will open_stream on the VM it created; here we prove the seam works
     //    with the same driver instance the orchestrator uses.)
     use qwanban_hyperv::VmSpec;
     use qwanban_proto::config::ResourceCaps;
@@ -78,8 +79,8 @@ async fn orchestrator_provisions_vm_then_bootstrap_handshake_works() {
     driver.start_vm(&vm).await.unwrap();
     driver.await_state(&vm, VmState::Running, Duration::from_secs(5)).await.unwrap();
 
-    // 3. Open hvsocket + run the stub handshake.
-    let host_stream = driver.open_hvsocket(&vm, 9999).await.unwrap();
+    // 3. Open stream + run the stub handshake.
+    let host_stream = driver.open_stream(&vm, 9999).await.unwrap();
     let stub_stream = driver.take_stub_stream(&vm.vm_id).unwrap();
     let serve_cfg = ServeConfig {
         work_dir: work_dir.path().to_path_buf(),

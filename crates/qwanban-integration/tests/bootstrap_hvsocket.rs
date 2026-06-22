@@ -1,7 +1,7 @@
-//! Integration test: bootstrap over hvsocket.
+//! Integration test: bootstrap over TCP stream.
 //!
 //! Proves the stub `serve()` codec works over the *real* transport seam the
-//! orchestrator uses (MockHyperVDriver::open_hvsocket), not just a bare duplex.
+//! orchestrator uses (MockHyperVDriver::open_stream), not just a bare duplex.
 
 use qwanban_hyperv::{HyperVDriver, MockHyperVDriver, VmSpec, VmState};
 use qwanban_proto::config::ResourceCaps;
@@ -28,15 +28,15 @@ fn spec() -> VmSpec {
 }
 
 #[tokio::test]
-async fn stub_serve_over_hvsocket_full_bootstrap() {
+async fn stub_serve_over_stream_full_bootstrap() {
     let work_dir = tempfile::tempdir().unwrap();
     let driver = MockHyperVDriver::new();
     let vm = driver.create_case_vm(spec()).await.unwrap();
     driver.start_vm(&vm).await.unwrap();
     driver.await_state(&vm, VmState::Running, Duration::from_secs(5)).await.unwrap();
 
-    let host_stream = driver.open_hvsocket(&vm, 9999).await.unwrap();
-    let stub_stream = driver.take_stub_stream(&vm.vm_id).expect("stub stream after open_hvsocket");
+    let host_stream = driver.open_stream(&vm, 9999).await.unwrap();
+    let stub_stream = driver.take_stub_stream(&vm.vm_id).expect("stub stream after open_stream");
 
     let cfg = ServeConfig {
         work_dir: work_dir.path().to_path_buf(),
@@ -112,13 +112,13 @@ async fn stub_serve_over_hvsocket_full_bootstrap() {
 }
 
 #[tokio::test]
-async fn stub_rejects_bad_secret_over_hvsocket() {
+async fn stub_rejects_bad_secret_over_stream() {
     let work_dir = tempfile::tempdir().unwrap();
     let driver = MockHyperVDriver::new();
     let vm = driver.create_case_vm(spec()).await.unwrap();
     driver.start_vm(&vm).await.unwrap();
 
-    let host_stream = driver.open_hvsocket(&vm, 9999).await.unwrap();
+    let host_stream = driver.open_stream(&vm, 9999).await.unwrap();
     let stub_stream = driver.take_stub_stream(&vm.vm_id).unwrap();
 
     let cfg = ServeConfig {

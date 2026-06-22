@@ -1,6 +1,6 @@
-//! The stub `serve()` loop (§stub-loader). Drives the bootstrap protocol over a
-//! single bidirectional byte stream (hvsocket in prod, tokio duplex in tests):
-//! HELLO → AUTH → command loop (PUSH_AGENT/WriteFile/LAUNCH) → relay stdout/stderr/exit.
+//! The stub `serve()` loop (stub-loader). Drives the bootstrap protocol over a
+//! single bidirectional byte stream (TCP in prod, tokio duplex in tests):
+//! HELLO -> AUTH -> command loop (PUSH_AGENT/WriteFile/LAUNCH) -> relay stdout/stderr/exit.
 
 use crate::protocol::*;
 use sha2::{Digest, Sha256};

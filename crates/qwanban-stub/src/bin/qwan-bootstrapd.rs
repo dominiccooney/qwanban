@@ -1,24 +1,27 @@
-//! `qwan-bootstrapd` - the real hvsocket stub-loader daemon. Binds an AF_HYPERV
-//! listener on a service GUID inside the guest VM, accepts host connections,
+//! `qwan-bootstrapd` - the TCP stub-loader daemon. Binds a TCP listener on a
+//! port inside the guest VM, accepts host connections over the private vSwitch,
 //! and runs the bootstrap `serve()` loop on each.
 //!
 //! Usage:
-//!   qwan-bootstrapd --service-guid <GUID> --work-dir <DIR> --secret <SECRET>
+//!   qwan-bootstrapd --bind 0.0.0.0:7474 --work-dir <DIR> --secret <SECRET>
 //!
 //! Run this inside the guest VM (the one being driven by the host harness).
 //! It stays up and persistent, accepting one connection at a time.
 
-use qwanban_hyperv::hvsocket::HvSocketListener;
 use qwanban_stub::{serve, ServeConfig};
 use std::path::PathBuf;
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("qwanban=info".parse()?))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("qwanban=info".parse()?),
+        )
         .init();
 
-    let mut service_guid = String::new();
+    let mut bind_addr = String::new();
     let mut work_dir = PathBuf::new();
     let mut secret = String::new();
     let mut stub_version: u32 = 1;
@@ -26,30 +29,28 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--service-guid" => service_guid = args.next().expect("--service-guid needs a value"),
+            "--bind" => bind_addr = args.next().expect("--bind needs a value"),
             "--work-dir" => work_dir = PathBuf::from(args.next().expect("--work-dir needs a value")),
             "--secret" => secret = args.next().expect("--secret needs a value"),
-            "--stub-version" => stub_version = args.next().expect("--stub-version needs a value").parse()?,
+            "--stub-version" => stub_version = args.next().expect("value").parse()?,
             _ => eprintln!("unknown arg: {arg}"),
         }
     }
 
-    if service_guid.is_empty() || secret.is_empty() {
-        anyhow::bail!("--service-guid and --secret are required");
+    if bind_addr.is_empty() || secret.is_empty() {
+        anyhow::bail!("--bind and --secret are required");
     }
 
     std::fs::create_dir_all(&work_dir)?;
-    tracing::info!(%service_guid, ?work_dir, "qwan-bootstrapd binding hvsocket listener");
+    tracing::info!(%bind_addr, ?work_dir, "qwan-bootstrapd binding TCP listener");
 
-    let listener = HvSocketListener::bind(&service_guid).map_err(|e| {
-        anyhow::anyhow!("hvsocket bind failed (is vmicguestinterface running + service GUID registered?): {e}")
-    })?;
+    let listener = TcpListener::bind(&bind_addr).await?;
     tracing::info!("listening; waiting for host connection...");
 
     loop {
-        match listener.accept() {
-            Ok(stream) => {
-                tracing::info!("host connected");
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                tracing::info!(%peer, "host connected");
                 let cfg = ServeConfig {
                     work_dir: work_dir.clone(),
                     case_bootstrap_secret: secret.clone(),

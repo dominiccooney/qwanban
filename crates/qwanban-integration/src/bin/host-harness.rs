@@ -1,18 +1,15 @@
-//! `host-harness` — the host-side bootstrap driver. Connects to a real guest VM
-//! via AF_HYPERV hvsocket and drives the full bootstrap handshake:
-//! HELLO → AUTH → PUSH_AGENT → WriteFile → LAUNCH → STREAM → Exit.
-//!
-//! Run this ON THE HOST (not in the guest). It connects to the guest's
-//! `qwanban-stubd` via the VM GUID + service GUID.
+//! `host-harness` - the host-side bootstrap driver. Connects to a real guest VM
+//! via TCP over the private vSwitch and drives the full bootstrap handshake:
+//! HELLO -> AUTH -> PUSH_AGENT -> WriteFile -> LAUNCH -> STREAM -> Exit.
 //!
 //! Usage:
-//!   host-harness --vm-guid <VM-GUID> --service-guid <SVC-GUID> \
-//!                --secret <SECRET> [--stub-version 1] [--agent-path ./fake-agent]
+//!   host-harness --addr <GUEST-IP:PORT> --secret <SECRET> [--stub-version 1]
+//!                [--agent-path ./fake-agent] [--work-dir ./qwan-harness-work]
 
-use qwanban_hyperv::hvsocket::connect_hvsocket;
 use qwanban_stub::protocol::*;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 fn hex_sha256(b: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -23,8 +20,7 @@ fn hex_sha256(b: &[u8]) -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut vm_guid = String::new();
-    let mut service_guid = String::new();
+    let mut addr = String::new();
     let mut secret = String::new();
     let mut stub_version: u32 = 1;
     let mut agent_path = std::path::PathBuf::from("./fake-agent");
@@ -33,24 +29,21 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--vm-guid" => vm_guid = args.next().expect("--vm-guid needs a value"),
-            "--service-guid" => service_guid = args.next().expect("--service-guid needs a value"),
+            "--addr" => addr = args.next().expect("--addr needs a value"),
             "--secret" => secret = args.next().expect("--secret needs a value"),
             "--stub-version" => stub_version = args.next().expect("value").parse()?,
-            "--agent-path" => agent_path = std::path::PathBuf::from(args.next().expect("--agent-path needs a value")),
-            "--work-dir" => work_dir = std::path::PathBuf::from(args.next().expect("--work-dir needs a value")),
+            "--agent-path" => agent_path = std::path::PathBuf::from(args.next().expect("value")),
+            "--work-dir" => work_dir = std::path::PathBuf::from(args.next().expect("value")),
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }
 
-    if vm_guid.is_empty() || service_guid.is_empty() || secret.is_empty() {
-        anyhow::bail!("--vm-guid, --service-guid, and --secret are required");
+    if addr.is_empty() || secret.is_empty() {
+        anyhow::bail!("--addr and --secret are required");
     }
 
-    println!("[harness] connecting to VM {vm_guid} service {service_guid} ...");
-    let mut stream = connect_hvsocket(&vm_guid, &service_guid).map_err(|e| {
-        anyhow::anyhow!("hvsocket connect failed (is the guest's qwanban-stubd running + vmicguestinterface up?): {e}")
-    })?;
+    println!("[harness] connecting to {addr} ...");
+    let mut stream = TcpStream::connect(&addr).await?;
     println!("[harness] connected!");
 
     // HELLO
@@ -76,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     if !is_ok(&push_ack) { anyhow::bail!("push_agent failed: {push_ack:?}"); }
     println!("[harness] PUSH_AGENT OK ({} bytes)", agent_bytes.len());
 
-    // WriteFile — write a manifest
+    // WriteFile
     let manifest = br#"{"schema":"qwan.manifest/v1"}"#;
     write_frame(&mut stream, &Frame::WriteFile(WriteFile {
         path: "manifest.json".into(), mode: "0644".into(), len: manifest.len() as u64,
@@ -86,13 +79,14 @@ async fn main() -> anyhow::Result<()> {
     if !is_ok(&wf_ack) { anyhow::bail!("write_file failed: {wf_ack:?}"); }
     println!("[harness] WriteFile OK");
 
-    // LAUNCH — OS-appropriate echo
+    // LAUNCH
     #[cfg(windows)]
     let (shell, command) = ("cmd", "echo qwan-launched-on-guest");
     #[cfg(not(windows))]
     let (shell, command) = ("sh", "echo qwan-launched-on-guest");
     write_frame(&mut stream, &Frame::Launch(Launch {
-        command: command.into(), shell: shell.into(), cwd: work_dir.to_string_lossy().to_string(),
+        command: command.into(), shell: shell.into(),
+        cwd: work_dir.to_string_lossy().to_string(),
         env: Default::default(),
     })).await?;
     let launch_ack = read_frame(&mut stream).await?;
