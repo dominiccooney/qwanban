@@ -16,6 +16,7 @@ qwanban-guest.workspace = true
 qwanban-artifacts.workspace = true
 qwanban-vault.workspace = true
 qwanban-proxy.workspace = true
+anyhow.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "fs"] }
 serde_json.workspace = true

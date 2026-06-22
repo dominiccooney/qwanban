@@ -5,6 +5,8 @@
 //! broker integration harness run in the dev VM with no Hyper-V.
 
 pub mod mock;
+#[cfg(windows)]
+pub mod hvsocket;
 
 use async_trait::async_trait;
 use qwanban_proto::{QwanResult, config::ResourceCaps, id::{CaseId, CheckpointId, VmId}};

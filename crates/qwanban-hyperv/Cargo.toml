@@ -11,9 +11,10 @@ qwanban-proto.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "net"] }
 tracing.workspace = true
 parking_lot.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }
