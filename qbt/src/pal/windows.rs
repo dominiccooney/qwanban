@@ -24,7 +24,7 @@ impl DesktopDC {
             let hdc = GetDC(Some(hwnd));
             if hdc.is_invalid() {
                 ReleaseDC(None, hdc);
-                bail!("failed to get screen DC");
+                bail!("failed to get desktop device context");
             }
             Ok(Self {
                 hwnd,

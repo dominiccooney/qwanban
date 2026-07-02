@@ -1,9 +1,11 @@
+use tokio::time::Instant;
 use clap::{CommandFactory, Parser, Subcommand};
 use image::ImageError;
 
 #[cfg(target_os = "windows")]
 #[path = "pal/windows.rs"]
 mod pal;
+mod video;
 
 #[derive(Parser)]
 #[command(about = "Qwanban native support tools", name = "qbt")]
@@ -15,9 +17,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum CliCommand {
     Screenshot,
+    Video,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Cli::parse();
     match &args.command {
         Some(CliCommand::Screenshot) => match pal::screenshot() {
@@ -33,6 +37,9 @@ fn main() {
                 std::process::exit(1)
             }
         },
+        Some(CliCommand::Video) => {
+            video::encode_video_demo().await.unwrap();
+        }
         None => {
             let mut cmd = Cli::command();
             cmd.print_help().unwrap();
