@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail};
 use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, RECT};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
-use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY};
-use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, GetWindowRect, SetProcessDPIAware};
+use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, SRCCOPY};
+use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, GetWindowRect, GetCursorInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING, SM_CXCURSOR, SM_CYCURSOR, DI_NORMAL, DrawIconEx};
 
 type ScreenshotImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
 
@@ -40,10 +40,11 @@ pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
 
         // Copy and extract pixels
         BitBlt(hdc_memory, 0, 0, width, height, Some(hdc_screen), rect.left, rect.top, SRCCOPY)?;
+        draw_cursor_to_dc(hdc_memory, rect.left, rect.top)?;
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: width,
                 biHeight: -height, // top down
                 biPlanes: 1,
@@ -76,5 +77,26 @@ pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
         }
         image::RgbaImage::from_raw(width as u32, height as u32, pixels)
             .ok_or(anyhow!("Failed to create image"))
+    }
+}
+
+fn draw_cursor_to_dc(hdc: HDC, screen_x: i32, screen_y: i32) -> anyhow::Result<()> {
+    unsafe {
+        let mut cursor_info = CURSORINFO {
+            cbSize: size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        GetCursorInfo(&mut cursor_info)?;
+        if cursor_info.flags != CURSOR_SHOWING {
+            return Ok(());
+        }
+
+        let cursor_width = GetSystemMetrics(SM_CXCURSOR);
+        let cursor_height = GetSystemMetrics(SM_CYCURSOR);
+        let target_x = cursor_info.ptScreenPos.x - screen_x;
+        let target_y = cursor_info.ptScreenPos.y - screen_y;
+
+        DrawIconEx(hdc, target_x, target_y, cursor_info.hCursor.into(), 0, 0, 0, None, DI_NORMAL)?;
+        Ok(())
     }
 }
