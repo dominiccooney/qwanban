@@ -1,8 +1,15 @@
 use anyhow::{anyhow, bail};
 use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, RECT};
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
-use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, SRCCOPY};
-use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, GetWindowRect, GetCursorInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING, SM_CXCURSOR, SM_CYCURSOR, DI_NORMAL, DrawIconEx};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC, SRCCOPY,
+    SelectObject,
+};
+use windows::Win32::UI::HiDpi::{PROCESS_PER_MONITOR_DPI_AWARE, SetProcessDpiAwareness};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetDesktopWindow,
+    GetWindowRect,
+};
 
 type ScreenshotImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
 
@@ -39,7 +46,17 @@ pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
         let h_old_bitmap = SelectObject(hdc_memory, h_bitmap.into());
 
         // Copy and extract pixels
-        BitBlt(hdc_memory, 0, 0, width, height, Some(hdc_screen), rect.left, rect.top, SRCCOPY)?;
+        BitBlt(
+            hdc_memory,
+            0,
+            0,
+            width,
+            height,
+            Some(hdc_screen),
+            rect.left,
+            rect.top,
+            SRCCOPY,
+        )?;
         draw_cursor_to_dc(hdc_memory, rect.left, rect.top)?;
 
         let mut bmi = BITMAPINFO {
@@ -56,7 +73,15 @@ pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
         };
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
-        let get_dib_bits_result = GetDIBits(hdc_memory, h_bitmap, 0, height as u32, Some(pixels.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
+        let get_dib_bits_result = GetDIBits(
+            hdc_memory,
+            h_bitmap,
+            0,
+            height as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
         if get_dib_bits_result == 0 || get_dib_bits_result == ERROR_INVALID_PARAMETER.0 as i32 {
             bail!("failed get bitmap")
         }
@@ -91,12 +116,20 @@ fn draw_cursor_to_dc(hdc: HDC, screen_x: i32, screen_y: i32) -> anyhow::Result<(
             return Ok(());
         }
 
-        let cursor_width = GetSystemMetrics(SM_CXCURSOR);
-        let cursor_height = GetSystemMetrics(SM_CYCURSOR);
         let target_x = cursor_info.ptScreenPos.x - screen_x;
         let target_y = cursor_info.ptScreenPos.y - screen_y;
 
-        DrawIconEx(hdc, target_x, target_y, cursor_info.hCursor.into(), 0, 0, 0, None, DI_NORMAL)?;
+        DrawIconEx(
+            hdc,
+            target_x,
+            target_y,
+            cursor_info.hCursor.into(),
+            0,
+            0,
+            0,
+            None,
+            DI_NORMAL,
+        )?;
         Ok(())
     }
 }
