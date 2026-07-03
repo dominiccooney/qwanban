@@ -204,7 +204,7 @@ impl ScreenSampler {
                 ..Default::default()
             };
 
-            assert!((width * height * 4) as usize <= pixels.len());
+            assert!((width * height * 4) <= pixels.len());
             let get_dib_bits_result = GetDIBits(
                 self.switch.hdc.hdc,
                 self.switch.bitmap.hbitmap,
