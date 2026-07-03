@@ -25,8 +25,8 @@ const TIMESTAMP_SCALE_NANOS: u64 = 1_000_000;
 fn rgba_to_yuv420(image: &RgbaImage) -> (Vec<u8>, Vec<u8>, Vec<u8>, usize, usize) {
     let width = image.width() as usize;
     let height = image.height() as usize;
-    let chroma_width = (width + 1) / 2;
-    let chroma_height = (height + 1) / 2;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
 
     let mut y_plane = vec![0u8; width * height];
     for y in 0..height {
@@ -71,8 +71,9 @@ fn rgba_to_yuv420(image: &RgbaImage) -> (Vec<u8>, Vec<u8>, Vec<u8>, usize, usize
 }
 
 pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
+    let sampler = pal::ScreenSampler::new()?;
     let start_time = Instant::now();
-    let image = pal::screenshot()?;
+    let image = sampler.screenshot()?;
     let mut writer = WebmWriter::new(File::create("video.webm")?);
 
     writer.write(&MatroskaSpec::Ebml(Master::Start))?;

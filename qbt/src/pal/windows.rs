@@ -88,101 +88,129 @@ impl Drop for OwnedHDC {
     }
 }
 
-struct DeviceContextBitmapSwitcheroo<'a> {
-    hdc: &'a HDC,
+// Takes ownership of a HDC and a HBITMAP, switching the HDC's bitmap for the lifetime of this
+// Switcheroo.
+struct DeviceContextBitmapSwitcheroo {
+    hdc: OwnedHDC,
     old_bitmap: HGDIOBJ,
+    bitmap: OwnedHBITMAP,
 }
 
-impl <'a> DeviceContextBitmapSwitcheroo<'a> {
-    // Note: The extensive lifetime on new_bitmap is because we will use the bitmap until we
-    // swap the old one back, even though we're not holding onto the *handle* anywhere.
-    unsafe fn select(hdc: &'a HDC, new_bitmap: &'a HBITMAP) -> Self {
+impl DeviceContextBitmapSwitcheroo {
+    unsafe fn select(hdc: OwnedHDC, new_bitmap: OwnedHBITMAP) -> Self {
         unsafe {
-            let old_bitmap = SelectObject(*hdc, (*new_bitmap).into());
+            let old_bitmap = SelectObject(hdc.hdc, new_bitmap.hbitmap.into());
             Self {
                 hdc,
                 old_bitmap,
+                bitmap: new_bitmap,
             }
         }
     }
 }
 
-impl <'a> Drop for DeviceContextBitmapSwitcheroo<'a> {
+impl Drop for DeviceContextBitmapSwitcheroo {
     fn drop(&mut self) {
         unsafe {
-            SelectObject(*self.hdc, self.old_bitmap);
+            SelectObject(self.hdc.hdc, self.old_bitmap);
         }
     }
 }
 
-pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
-    unsafe {
-        #[allow(unused_must_use)]
-        SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+pub(crate) struct ScreenSampler {
+    desktop: DesktopDC,
+    rect: RECT,
+    switch: DeviceContextBitmapSwitcheroo,
+}
 
-        // Get the desktop and dimensions
-        let desktop = DesktopDC::get()?;
-        let mut rect = RECT::default();
-        GetWindowRect(desktop.hwnd, &mut rect)?;
-        let (width, height) = (rect.right, rect.bottom);
+impl ScreenSampler {
+    pub(crate) fn new() -> anyhow::Result<Self> {
+        unsafe {
+            #[allow(unused_must_use)]
+            SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 
-        let h_bitmap = OwnedHBITMAP::adopt(CreateCompatibleBitmap(desktop.hdc, width, height)).context("creating bitmap to copy screen contents")?;
-        let hdc_memory = OwnedHDC::adopt(CreateCompatibleDC(Some(desktop.hdc))).context("creating memory device context")?;
-        let switch = DeviceContextBitmapSwitcheroo::select(&hdc_memory.hdc, &h_bitmap.hbitmap);
+            // Get the desktop and dimensions
+            let desktop = DesktopDC::get()?;
+            let mut rect = RECT::default();
+            GetWindowRect(desktop.hwnd, &mut rect)?;
+            let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
 
-        // Copy and extract pixels
-        BitBlt(
-            hdc_memory.hdc,
-            0,
-            0,
-            width,
-            height,
-            Some(desktop.hdc),
-            rect.left,
-            rect.top,
-            SRCCOPY,
-        )?;
-        draw_cursor_to_dc(hdc_memory.hdc, rect.left, rect.top)?;
+            let h_bitmap = OwnedHBITMAP::adopt(CreateCompatibleBitmap(desktop.hdc, width, height)).context("creating bitmap to copy screen contents")?;
+            let hdc_memory = OwnedHDC::adopt(CreateCompatibleDC(Some(desktop.hdc))).context("creating memory device context")?;
+            let switch = DeviceContextBitmapSwitcheroo::select(hdc_memory, h_bitmap);
 
-        let mut bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height, // top down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        let get_dib_bits_result = GetDIBits(
-            hdc_memory.hdc,
-            h_bitmap.hbitmap,
-            0,
-            height as u32,
-            Some(pixels.as_mut_ptr() as *mut _),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        );
-        if get_dib_bits_result == 0 || get_dib_bits_result == ERROR_INVALID_PARAMETER.0 as i32 {
-            bail!("failed get bitmap")
+            Ok(Self {
+                desktop,
+                rect,
+                switch,
+            })
         }
+    }
 
-        // Clean up
-        drop(switch);
-        drop(h_bitmap);
-        drop(hdc_memory);
-        drop(desktop);
+    // Takes a screenshot and returns an RGBA8 image.
+    pub(crate) fn screenshot(&self) -> anyhow::Result<ScreenshotImage> {
+        let (width, height) = (self.rect.right - self.rect.left, self.rect.bottom - self.rect.top);
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+
+        self.screen_sample(&mut pixels)?;
 
         // Convert from BGRA to RGBA PNG
         for chunk in pixels.chunks_exact_mut(4) {
             chunk.swap(0, 2);
         }
+
         image::RgbaImage::from_raw(width as u32, height as u32, pixels)
             .ok_or(anyhow!("Failed to create image"))
+    }
+
+    // Gets what's on the screen, in a raw array of BGRA bytes.
+    pub(crate) fn screen_sample(&self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
+        unsafe {
+            let (width, height) = (self.rect.right - self.rect.left, self.rect.bottom - self.rect.top);
+
+            // Copy and extract pixels
+            BitBlt(
+                self.switch.hdc.hdc,
+                0,
+                0,
+                width,
+                height,
+                Some(self.desktop.hdc),
+                self.rect.left,
+                self.rect.top,
+                SRCCOPY,
+            )?;
+            draw_cursor_to_dc(self.switch.hdc.hdc, self.rect.left, self.rect.top)?;
+
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height, // top down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            assert!((width * height * 4) as usize <= pixels.len());
+            let get_dib_bits_result = GetDIBits(
+                self.switch.hdc.hdc,
+                self.switch.bitmap.hbitmap,
+                0,
+                height as u32,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if get_dib_bits_result == 0 || get_dib_bits_result == ERROR_INVALID_PARAMETER.0 as i32 {
+                bail!("failed get bitmap")
+            }
+
+            Ok(())
+        }
     }
 }
 

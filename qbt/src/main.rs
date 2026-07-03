@@ -1,4 +1,3 @@
-use tokio::time::Instant;
 use clap::{CommandFactory, Parser, Subcommand};
 use image::ImageError;
 
@@ -24,17 +23,20 @@ enum CliCommand {
 async fn main() {
     let args = Cli::parse();
     match &args.command {
-        Some(CliCommand::Screenshot) => match pal::screenshot() {
-            Ok(screenshot) => screenshot
-                .save("screenshot.png")
-                .map_err(|err: ImageError| -> anyhow::Result<()> {
-                    eprintln!("could not save screenshot: {:?}", err);
-                    std::process::exit(1);
-                })
-                .unwrap(),
-            Err(err) => {
-                eprintln!("{:?}", err);
-                std::process::exit(1)
+        Some(CliCommand::Screenshot) => {
+            let sampler = pal::ScreenSampler::new().unwrap();
+            match sampler.screenshot() {
+                Ok(screenshot) => screenshot
+                    .save("screenshot.png")
+                    .map_err(|err: ImageError| -> anyhow::Result<()> {
+                        eprintln!("could not save screenshot: {:?}", err);
+                        std::process::exit(1);
+                    })
+                    .unwrap(),
+                Err(err) => {
+                    eprintln!("{:?}", err);
+                    std::process::exit(1)
+                }
             }
         },
         Some(CliCommand::Video) => {
