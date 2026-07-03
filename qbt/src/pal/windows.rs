@@ -147,34 +147,43 @@ impl ScreenSampler {
         }
     }
 
+    pub(crate) fn size_px(&self) -> (usize, usize) {
+        ((self.rect.right - self.rect.left) as usize, (self.rect.bottom - self.rect.top) as usize)
+    }
+
+    pub(crate) fn pixel_buffer_size_u8(&self) -> usize {
+        let (width, height) = self.size_px();
+        width * height * 4
+    }
+
     // Takes a screenshot and returns an RGBA8 image.
     pub(crate) fn screenshot(&self) -> anyhow::Result<ScreenshotImage> {
-        let (width, height) = (self.rect.right - self.rect.left, self.rect.bottom - self.rect.top);
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let mut pixels = vec![0u8; self.pixel_buffer_size_u8()];
 
-        self.screen_sample(&mut pixels)?;
+        self.sample(&mut pixels)?;
 
         // Convert from BGRA to RGBA PNG
         for chunk in pixels.chunks_exact_mut(4) {
             chunk.swap(0, 2);
         }
 
+        let (width, height) = self.size_px();
         image::RgbaImage::from_raw(width as u32, height as u32, pixels)
             .ok_or(anyhow!("Failed to create image"))
     }
 
     // Gets what's on the screen, in a raw array of BGRA bytes.
-    pub(crate) fn screen_sample(&self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
+    pub(crate) fn sample(&self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
         unsafe {
-            let (width, height) = (self.rect.right - self.rect.left, self.rect.bottom - self.rect.top);
+            let (width, height) = self.size_px();
 
             // Copy and extract pixels
             BitBlt(
                 self.switch.hdc.hdc,
                 0,
                 0,
-                width,
-                height,
+                width as i32,
+                height as i32,
                 Some(self.desktop.hdc),
                 self.rect.left,
                 self.rect.top,
@@ -185,8 +194,8 @@ impl ScreenSampler {
             let mut bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width,
-                    biHeight: -height, // top down
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // top down
                     biPlanes: 1,
                     biBitCount: 32,
                     biCompression: BI_RGB.0,

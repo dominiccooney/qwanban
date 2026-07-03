@@ -4,6 +4,7 @@ use rav1e::prelude::*;
 use tokio::time::Instant;
 use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
 use webm_iterable::WebmWriter;
+use yuvutils_rs::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
 use crate::pal;
 
 /// Number of nanoseconds represented by one tick of the timestamps written
@@ -73,7 +74,6 @@ fn rgba_to_yuv420(image: &RgbaImage) -> (Vec<u8>, Vec<u8>, Vec<u8>, usize, usize
 pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     let sampler = pal::ScreenSampler::new()?;
     let start_time = Instant::now();
-    let image = sampler.screenshot()?;
     let mut writer = WebmWriter::new(File::create("video.webm")?);
 
     writer.write(&MatroskaSpec::Ebml(Master::Start))?;
@@ -87,9 +87,10 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     writer.write(&MatroskaSpec::Info(Master::End))?;
 
     // Set up a rav1e context
+    let (width, height) = sampler.size_px();
     let encoder_config = rav1e::Config::new().with_encoder_config(rav1e::EncoderConfig {
-        width: image.width() as usize,
-        height: image.height() as usize,
+        width,
+        height,
         speed_settings: SpeedSettings::from_preset(10),
         ..Default::default()
     });
@@ -111,8 +112,8 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     writer.write(&MatroskaSpec::CodecID(String::from("V_AV1")))?;
     writer.write(&MatroskaSpec::CodecPrivate(codec_private))?;
     writer.write(&MatroskaSpec::Video(Master::Start))?;
-    writer.write(&MatroskaSpec::PixelWidth(image.width() as u64))?;
-    writer.write(&MatroskaSpec::PixelHeight(image.height() as u64))?;
+    writer.write(&MatroskaSpec::PixelWidth(width as u64))?;
+    writer.write(&MatroskaSpec::PixelHeight(height as u64))?;
     writer.write(&MatroskaSpec::Video(Master::End))?;
     writer.write(&MatroskaSpec::TrackEntry(Master::End))?;
 
@@ -120,14 +121,20 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
 
     writer.write(&MatroskaSpec::Tracks(Master::End))?;
 
+    let mut pixels_gbra8 = vec![0u8; sampler.pixel_buffer_size_u8()];
+    let mut image_yuv = YuvPlanarImageMut::alloc(width as u32, height as u32, YuvChromaSubsampling::Yuv420);
+
     // Encode a frame. AV1/rav1e needs planar YUV 4:2:0 data, so convert the
     // interleaved RGBA screenshot first, then copy each plane in separately
     // using that plane's own (tightly-packed) width as the source stride.
-    let (y_plane, u_plane, v_plane, chroma_width, _chroma_height) = rgba_to_yuv420(&image);
+    sampler.sample(&mut pixels_gbra8)?;
+    let stride_bgra = (width * 4) as u32;
+    yuvutils_rs::bgra_to_yuv420(&mut image_yuv, &pixels_gbra8, stride_bgra, YuvRange::Limited, YuvStandardMatrix::Bt709, YuvConversionMode::Fast)?;
+
     let mut frame = encoder_context.new_frame();
-    frame.planes[0].copy_from_raw_u8(&y_plane, image.width() as usize, 1);
-    frame.planes[1].copy_from_raw_u8(&u_plane, chroma_width, 1);
-    frame.planes[2].copy_from_raw_u8(&v_plane, chroma_width, 1);
+    frame.planes[0].copy_from_raw_u8(image_yuv.y_plane.borrow(), image_yuv.y_stride as usize, 1);
+    frame.planes[1].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
+    frame.planes[2].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
     encoder_context.send_frame(frame)?;
 
     encoder_context.flush();
