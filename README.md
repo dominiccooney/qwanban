@@ -1,3 +1,7 @@
+## Prerequisites
+
+Install NASM `winget -e --id NASM.NASM` and add C:\Users\user\AppData\Local\bin\NASM to your PATH.
+
 ## Caveats
 
 On Windows, the screen recorder may produce blank output. This is because hardware composited surfaces and cursors
