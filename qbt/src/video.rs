@@ -134,7 +134,7 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     let mut frame = encoder_context.new_frame();
     frame.planes[0].copy_from_raw_u8(image_yuv.y_plane.borrow(), image_yuv.y_stride as usize, 1);
     frame.planes[1].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
-    frame.planes[2].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
+    frame.planes[2].copy_from_raw_u8(image_yuv.v_plane.borrow(), image_yuv.v_stride as usize, 1);
     encoder_context.send_frame(frame)?;
 
     encoder_context.flush();
