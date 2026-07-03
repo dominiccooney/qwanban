@@ -28,7 +28,7 @@ struct PixelBufferPool {
 }
 
 impl PixelBufferPool {
-    const MAX_PIXEL_BUFFER_COUNT: usize = 5;
+    const MAX_PIXEL_BUFFER_COUNT: usize = 16;
 
     pub fn new(mut freed_buffers: mpsc::Receiver<Vec<u8>>, buffer_size: usize) -> Self {
         let semaphore = Arc::new(Semaphore::new(Self::MAX_PIXEL_BUFFER_COUNT));
@@ -243,7 +243,7 @@ impl <W: std::io::Write + Send + Sync + 'static> ThreadedEncoder<W> {
                     let block_timestamp = if packet.input_frameno == 0 { 0i16 } else {
                         // TODO: this `as_millis` needs to be kept in sync with the TIMESTAMP_SCALE_NANOS.
                         // TODO: check this doesn't overflow i16.
-                        frame_times[packet.input_frameno as usize].duration_since(frame_times[(packet.input_frameno - 1) as usize]).as_millis() as i16
+                        frame_times[packet.input_frameno as usize].duration_since(frame_times[0]).as_millis() as i16
                     };
                     eprintln!("writing frame #{} duration {}", packet.input_frameno, block_timestamp);
                     let simple_block = SimpleBlock::new_uncheked(
@@ -258,9 +258,10 @@ impl <W: std::io::Write + Send + Sync + 'static> ThreadedEncoder<W> {
                     writer.write(&MatroskaSpec::from(simple_block)).unwrap();
                 }
                 Err(err) => match err {
-                    EncoderStatus::LimitReached | EncoderStatus::NeedMoreData | EncoderStatus::Encoded => {
+                    EncoderStatus::LimitReached | EncoderStatus::NeedMoreData => {
                         break 'encoding;
                     }
+                    EncoderStatus::Encoded => {}
                     EncoderStatus::NotReady => {
                         unreachable!("\"not ready\", but we are not doing two-pass encoding");
                     }
@@ -303,8 +304,8 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     writer.write(&MatroskaSpec::Tracks(Master::End))?;
     threaded_encoder.start_writing(writer).await?;
 
-    let goal_total_duration = Duration::from_secs(10);
-    let goal_delay = Duration::from_secs(1) / 5;
+    let goal_total_duration = Duration::from_secs(30);
+    let goal_delay = Duration::from_secs(1) / 8;
     let start_time = Instant::now();
     while start_time.elapsed() < goal_total_duration {
         // Encode a frame. AV1/rav1e needs planar YUV 4:2:0 data, so convert the
