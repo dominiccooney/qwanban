@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::time::Duration;
 use rav1e::prelude::*;
 use tokio::time::Instant;
 use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
@@ -10,10 +11,12 @@ use crate::pal;
 /// into this file (Cluster/Timestamp and Block timestamps). 1,000,000ns = 1ms
 /// per tick, which is the conventional value used by most webm muxers.
 const TIMESTAMP_SCALE_NANOS: u64 = 1_000_000;
+// Note: Because frames have 16-bit signed timestamp offsets, frame gaps longer than ~32 seconds
+// need to start a new cluster.
 
 pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     let sampler = pal::ScreenSampler::new()?;
-    let start_time = Instant::now();
+
     let mut writer = WebmWriter::new(File::create("video.webm")?);
 
     writer.write(&MatroskaSpec::Ebml(Master::Start))?;
@@ -64,18 +67,31 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
     let mut pixels_gbra8 = vec![0u8; sampler.pixel_buffer_size_u8()];
     let mut image_yuv = YuvPlanarImageMut::alloc(width as u32, height as u32, YuvChromaSubsampling::Yuv420);
 
-    // Encode a frame. AV1/rav1e needs planar YUV 4:2:0 data, so convert the
-    // interleaved RGBA screenshot first, then copy each plane in separately
-    // using that plane's own (tightly-packed) width as the source stride.
-    sampler.sample(&mut pixels_gbra8)?;
-    let stride_bgra = (width * 4) as u32;
-    yuvutils_rs::bgra_to_yuv420(&mut image_yuv, &pixels_gbra8, stride_bgra, YuvRange::Limited, YuvStandardMatrix::Bt709, YuvConversionMode::Fast)?;
+    let goal_delay = Duration::from_secs(1) / 15;
+    let start_time = Instant::now();
+    let mut frame_times: Vec<Duration> = Vec::<Duration>::new();
+    for i in 0..60 {
+        // Encode a frame. AV1/rav1e needs planar YUV 4:2:0 data, so convert the
+        // interleaved GRBA screen sample first.
+        let this_frame_time = Instant::now();
+        eprintln!("frame {}: {:?}", i, this_frame_time);
+        sampler.sample(&mut pixels_gbra8)?;
+        let stride_bgra = (width * 4) as u32;
+        yuvutils_rs::bgra_to_yuv420(&mut image_yuv, &pixels_gbra8, stride_bgra, YuvRange::Limited, YuvStandardMatrix::Bt709, YuvConversionMode::Fast)?;
 
-    let mut frame = encoder_context.new_frame();
-    frame.planes[0].copy_from_raw_u8(image_yuv.y_plane.borrow(), image_yuv.y_stride as usize, 1);
-    frame.planes[1].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
-    frame.planes[2].copy_from_raw_u8(image_yuv.v_plane.borrow(), image_yuv.v_stride as usize, 1);
-    encoder_context.send_frame(frame)?;
+        let mut frame = encoder_context.new_frame();
+        frame.planes[0].copy_from_raw_u8(image_yuv.y_plane.borrow(), image_yuv.y_stride as usize, 1);
+        frame.planes[1].copy_from_raw_u8(image_yuv.u_plane.borrow(), image_yuv.u_stride as usize, 1);
+        frame.planes[2].copy_from_raw_u8(image_yuv.v_plane.borrow(), image_yuv.v_stride as usize, 1);
+        encoder_context.send_frame(frame)?;
+
+        frame_times.push(this_frame_time - start_time);
+
+        let submit_duration = Instant::now().duration_since(this_frame_time);
+        if submit_duration < goal_delay {
+            tokio::time::sleep(goal_delay - submit_duration).await;
+        }
+    }
 
     encoder_context.flush();
 
@@ -89,7 +105,8 @@ pub(crate) async fn encode_video_demo() -> anyhow::Result<()> {
             Ok(packet) => {
                 // Block timestamps are relative to the enclosing Cluster's
                 // Timestamp, in TimestampScale units, and stored as an i16.
-                let block_timestamp: i16 = 0;
+                // TODO: this `as_millis` needs to be kept in sync with the TIMESTAMP_SCALE_NANOS.
+                let block_timestamp: i16 = frame_times[packet.input_frameno as usize].as_millis() as i16;
                 let simple_block = SimpleBlock::new_uncheked(
                     &packet.data,
                     video_track_number,
