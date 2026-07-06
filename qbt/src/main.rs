@@ -4,6 +4,7 @@ use image::ImageError;
 #[cfg(target_os = "windows")]
 #[path = "pal/windows.rs"]
 mod pal;
+mod transcode;
 mod video;
 
 #[derive(Parser)]
@@ -40,7 +41,7 @@ async fn main() {
             }
         },
         Some(CliCommand::Video) => {
-            video::encode_video_demo().await.unwrap();
+            video::offline_encode_video_demo().await.unwrap();
         }
         None => {
             let mut cmd = Cli::command();
