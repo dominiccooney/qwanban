@@ -4,7 +4,6 @@ use image::ImageError;
 #[cfg(target_os = "windows")]
 #[path = "pal/windows.rs"]
 mod pal;
-mod transcode;
 mod video;
 
 #[derive(Parser)]
