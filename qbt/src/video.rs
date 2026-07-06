@@ -1,13 +1,12 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Write};
 use std::num::NonZero;
 use std::ops::Sub;
 use std::time::Duration;
 use tokio::time::Instant;
-use vpx_rs::{Encoder, EncoderConfig, EncoderFrameFlags, ImageFormat, Packet, RateControl, Timebase};
-use webm_iterable::matroska_spec::{Master, MatroskaSpec};
-use webm_iterable::WebmWriter;
-use yuvutils_rs::{BufferStoreMut, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
+use vpx_rs::{CompressedFrame, Encoder, EncoderConfig, EncoderFrameFlags, ImageFormat, Packet, RateControl, Timebase};
+use webm::mux::VideoCodecId;
+use yuvutils_rs::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
 use crate::pal;
 
 struct UnencodedFrame {
@@ -15,8 +14,21 @@ struct UnencodedFrame {
     timestamp: Instant,
 }
 
+trait FrameOutputter {
+    fn process(&mut self, frame: CompressedFrame, timestamp: Duration) -> anyhow::Result<()>;
+}
+
+impl<F> FrameOutputter for F
+where
+    F: FnMut(CompressedFrame, Duration) -> anyhow::Result<()>
+{
+    fn process(&mut self, frame: CompressedFrame, timestamp: Duration) -> anyhow::Result<()> {
+        self(frame, timestamp)
+    }
+}
+
 /// Captures and encodes a screen recording with low CPU utilization, for later offline re-encoding.
-struct DraftCapturer<W: std::io::Write> {
+struct DraftCapturer<W: FrameOutputter> {
     writer: W,
     encoder: Encoder<u8>,
     width: usize,
@@ -25,18 +37,19 @@ struct DraftCapturer<W: std::io::Write> {
     previous_frame: Option<UnencodedFrame>,
 }
 
-impl <W: std::io::Write + std::io::Seek + std::io::Read> DraftCapturer<W> {
-    pub(crate) fn new(writer: W, (width, height): (usize, usize)) -> anyhow::Result<Self> {
+impl <W: FrameOutputter> DraftCapturer<W> {
+    pub(crate) fn new((width, height): (usize, usize), writer: W) -> anyhow::Result<Self> {
         let config = EncoderConfig::<u8>::new(
             vpx_rs::enc::CodecId::VP9,
             width as u32,
             height as u32,
-            // Set the timebase to 1ms, even though we won't be encoding 1000 FPS, so we can
+            // Set the timebase to 1ms, even though we won't be encoding 1_000 FPS, so we can
             // use millisecond timestamps as presentation times.
             Timebase {
                 num: NonZero::new(1).unwrap(),
                 den: NonZero::new(Duration::from_secs(1).as_millis() as u32).unwrap(),
             },
+            // TODO: Consider using a specific bitrate here.
             RateControl::Lossless,
         )?;
 
@@ -50,14 +63,13 @@ impl <W: std::io::Write + std::io::Seek + std::io::Read> DraftCapturer<W> {
         })
     }
 
-    pub(crate) fn flush(mut self) -> anyhow::Result<W> {
+    pub(crate) fn flush(&mut self) -> anyhow::Result<()> {
         if let Some(previous_frame) = self.previous_frame.take() {
             // We present the last frame for an arbitrary 32 msec (= 30 FPS.)
             let presentation_end = previous_frame.timestamp + Duration::from_millis(32);
             self.encode_and_write(previous_frame, presentation_end)?;
         }
-        self.writer.flush()?;
-        Ok(self.writer)
+        Ok(())
     }
 
     pub(crate) fn encode(&mut self, pixels_yuv420: Vec<u8>, timestamp: Instant) -> anyhow::Result<()> {
@@ -81,7 +93,7 @@ impl <W: std::io::Write + std::io::Seek + std::io::Read> DraftCapturer<W> {
             &frame.pixels_yuv420,
         )?;
         let packets = self.encoder.encode(
-            self.start_time.unwrap().duration_since(frame.timestamp).as_millis() as i64,
+            frame.timestamp.duration_since(self.start_time.unwrap()).as_millis() as i64,
             end_timestamp.duration_since(frame.timestamp).as_millis() as u64,
             image,
             vpx_rs::EncodingDeadline::Realtime,
@@ -90,7 +102,8 @@ impl <W: std::io::Write + std::io::Seek + std::io::Read> DraftCapturer<W> {
         for packet in packets {
             match packet {
                 Packet::CompressedFrame(frame) => {
-                    self.writer.write_all(&frame.data)?;
+                    let frame_presentation_time = Duration::from_millis(frame.pts as u64);
+                    self.writer.process(frame, frame_presentation_time)?;
                 }
                 _ => {
                     unreachable!("encoder is not configured to produce packet: {:?}", packet);
@@ -103,13 +116,23 @@ impl <W: std::io::Write + std::io::Seek + std::io::Read> DraftCapturer<W> {
 
 pub(crate) async fn offline_encode_video_demo() -> anyhow::Result<()> {
     let sampler = pal::ScreenSampler::new()?;
-    let writer = File::create("video.tmp")?;
+
+    let mut file = File::create("video.webm")?;
+    let writer = webm::mux::Writer::new(file);
+
+    let builder = webm::mux::SegmentBuilder::new(writer)?.set_mode(webm::mux::SegmentMode::File);
     let (width, height) = sampler.size_px();
-    // TODO: Borrow, don't take, writer
-    let mut encoder = DraftCapturer::new(writer, sampler.size_px())?;
+    let (builder, video_track) = builder?.add_video_track(width as u32, height as u32, VideoCodecId::VP9, None)?;
+    let mut segment = builder.build();
+
+    let mut encoder = DraftCapturer::new(sampler.size_px(), |compressed_frame: CompressedFrame, timestamp: Duration| {
+        segment.add_frame(video_track, &compressed_frame.data, timestamp.as_nanos() as u64, compressed_frame.flags.is_key)?;
+        Ok(())
+    })?;
+
     let mut pixels_bgra = vec![0u8; width * height * 4];
 
-    let goal_total_duration = Duration::from_secs(30);
+    let goal_total_duration = Duration::from_secs(15);
     let goal_delay = Duration::from_secs(1) / 15;
     let start_time = Instant::now();
     while start_time.elapsed() < goal_total_duration {
@@ -142,9 +165,13 @@ pub(crate) async fn offline_encode_video_demo() -> anyhow::Result<()> {
         }
     }
 
-    println!("Closing the threaded encoder.");
-
-    let mut source = encoder.flush()?;
+    println!("Closing the encoder.");
+    encoder.flush()?;
+    let writer = segment.finalize(None).unwrap_or_else(|writer| {
+        eprintln!("could not finalize segment");
+        writer
+    });
+    writer.into_inner().flush()?;
 
 /*
     // Now re-encode the stream as AV1.
