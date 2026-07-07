@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
+use crate::pal;
 
 #[derive(Deserialize)]
 pub(crate) struct MouseClickParams {
@@ -119,7 +120,7 @@ async fn handle_client(socket: TcpStream) -> anyhow::Result<()> {
         eprintln!("request: {}", line);
         match serde_json::from_str::<ComputerUseRequest>(&line) {
             Ok(request) => {
-                eprintln!("request is OK!")
+                handle_request(request, &mut framed).await?;
             }
             Err(e) => {
                 eprintln!("invalid request: {:?}", e)
@@ -128,4 +129,27 @@ async fn handle_client(socket: TcpStream) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStream, LinesCodec>) -> anyhow::Result<()> {
+    match request {
+        ComputerUseRequest::GetDisplayInfo { id } => {
+            let (width, height) = pal::ScreenSampler::new()?.size_px();
+            framed.send(serde_json::to_string(&RequestResponse {
+                id,
+                ok: true,
+                error: None,
+                text: None,
+                display: Some(ComputerUseDisplayInfo {
+                    width_px: width,
+                    height_px: height,
+                }),
+                image: None,
+            })?).await?;
+            Ok(())
+        }
+        _ => {
+            anyhow::bail!("NYI request type")
+        }
+    }
 }
