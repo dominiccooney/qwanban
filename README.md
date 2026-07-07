@@ -24,12 +24,30 @@ $env:VPX_INCLUDE_DIR = "${pwd}\installed\x64-windows\include"
 $env:VPX_VERSION = "1.16.0" # use vcpkg list to confirm this version
 ```
 
-Finally, `cargo build`.
+Finally, run the server:
+
+```powershell
+cargo run -- serve 1234
+```
+
+Get https://github.com/cline/cline branch dpc/computer-use, and:
+
+```powershell
+bun install
+bun build:sdk
+cd app/cli
+$Env:CLINE_COMPUTER_USE_PORT=1234
+$Env:CLINE_HUB_PORT=5555
+bun run dev
+```
+
+Then, you must use the Anthropic provider (*not* merely Anthropic models through the Cline provider, because those lack
+the computer-use beta header.)
 
 ## Caveats
 
 On Windows, the screen recorder may produce blank output. This is because hardware composited surfaces and cursors
-appear black. To fix this, implement support for media capture in qbt/src/pal/windows.rs. It was not done yet because
+appear black. To fix this, implement support for media capture in qbt/src/pal/windows. It was not done yet because
 most containers don't use GPU compositing.
 
 ## TODO
