@@ -1,11 +1,14 @@
 // See https://github.com/anthropics/claude-quickstarts/blob/main/computer-use-demo/computer_use_demo/tools/computer.py
 // See https://github.com/anthropics/anthropic-sdk-typescript/blob/4f2eb8071993780d79610b9eda26db96f7653843/src/resources/beta/messages/messages.ts#L3283
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
 use futures::{SinkExt, StreamExt};
+use image::ImageFormat;
 use crate::pal;
+use crate::pal::ScreenSampler;
 
 #[derive(Deserialize)]
 pub(crate) struct MouseClickParams {
@@ -76,18 +79,12 @@ pub(crate) struct ComputerUseResponse {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RequestResponse {
-    // Echoes the request id this response answers.
-    id: usize,
-    ok: bool,
-    // Present when ok is false.
-    error: Option<String>,
-    // Human-readable result text (e.g. cursor position, ack message).
-    text: Option<String>,
-    // Screenshots, post-action screenshots.
-    image: Option<ComputerUseImage>,
-    display: Option<ComputerUseDisplayInfo>,
+#[serde(rename_all = "camelCase", untagged)]
+pub(crate) enum RequestResponse {
+    Error { id: usize, error: String },
+    DisplayInfo { id: usize, ok: bool, display: ComputerUseDisplayInfo },
+    Text { id: usize, ok: bool, text: String },
+    Image { id: usize, ok: bool, image: ComputerUseImage },
 }
 
 #[derive(Serialize)]
@@ -135,16 +132,37 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
     match request {
         ComputerUseRequest::GetDisplayInfo { id } => {
             let (width, height) = pal::ScreenSampler::new()?.size_px();
-            framed.send(serde_json::to_string(&RequestResponse {
+            framed.send(serde_json::to_string(&RequestResponse::DisplayInfo {
                 id,
                 ok: true,
-                error: None,
-                text: None,
-                display: Some(ComputerUseDisplayInfo {
+                display: ComputerUseDisplayInfo {
                     width_px: width,
                     height_px: height,
-                }),
-                image: None,
+                }
+            })?).await?;
+            Ok(())
+        },
+        ComputerUseRequest::CursorPosition { id } => {
+            let (x, y) = pal::ScreenSampler::new()?.cursor_position()?;
+            framed.send(serde_json::to_string(&RequestResponse::Text {
+                id,
+                ok: true,
+                text: format!("X={},Y={}", x, y)
+            })?).await?;
+            Ok(())
+        },
+        ComputerUseRequest::Screenshot { id } => {
+            let screenshot = ScreenSampler::new()?.screenshot()?;
+            let mut png_bytes = Vec::new();
+            screenshot.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
+            let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+            framed.send(serde_json::to_string(&RequestResponse::Image {
+                id,
+                ok: true,
+                image: ComputerUseImage {
+                    data: base64_png_bytes,
+                    media_type: "image/png".into(),
+                }
             })?).await?;
             Ok(())
         }

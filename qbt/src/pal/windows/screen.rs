@@ -151,6 +151,15 @@ impl ScreenSampler {
         ((self.rect.right - self.rect.left) as usize, (self.rect.bottom - self.rect.top) as usize)
     }
 
+    pub(crate) fn cursor_position(&self) -> anyhow::Result<(usize, usize)> {
+        let mut cursor_info = CURSORINFO {
+            cbSize: size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetCursorInfo(&mut cursor_info)?; }
+        Ok((cursor_info.ptScreenPos.x as usize, cursor_info.ptScreenPos.y as usize))
+    }
+
     pub(crate) fn pixel_buffer_size_u8(&self) -> usize {
         let (width, height) = self.size_px();
         width * height * 4
