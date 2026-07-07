@@ -4,6 +4,7 @@ use image::ImageError;
 mod pal;
 mod video;
 mod input;
+mod server;
 
 #[derive(Parser)]
 #[command(about = "Qwanban native support tools", name = "qbt")]
@@ -17,37 +18,30 @@ enum CliCommand {
     Screenshot,
     Video,
     Input,
+    Serve { port: u16 },
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     match &args.command {
         Some(CliCommand::Screenshot) => {
-            let sampler = pal::ScreenSampler::new().unwrap();
-            match sampler.screenshot() {
-                Ok(screenshot) => screenshot
-                    .save("screenshot.png")
-                    .map_err(|err: ImageError| -> anyhow::Result<()> {
-                        eprintln!("could not save screenshot: {:?}", err);
-                        std::process::exit(1);
-                    })
-                    .unwrap(),
-                Err(err) => {
-                    eprintln!("{:?}", err);
-                    std::process::exit(1)
-                }
-            }
+            let sampler = pal::ScreenSampler::new()?;
+            sampler.screenshot()?.save("screenshot.png")?;
+            Ok(())
         },
         Some(CliCommand::Video) => {
-            video::offline_encode_video_demo().await.unwrap();
+            video::offline_encode_video_demo().await
         }
         Some(CliCommand::Input) => {
-            input::send_input_demo().await.unwrap();
+            input::send_input_demo().await
+        }
+        Some(CliCommand::Serve { port }) => {
+            server::start_jsonl_socket_server(*port).await
         }
         None => {
             let mut cmd = Cli::command();
-            cmd.print_help().unwrap();
+            cmd.print_help()?;
             std::process::exit(1)
         }
     }

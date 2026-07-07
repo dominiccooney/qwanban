@@ -12,6 +12,10 @@ vpx-rs = "0.2.1"
 webm = "2.2.0"
 yuvutils-rs = { version = "0.8.3", features = ["fast_mode"] }
 winput = "0.2.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+tokio-util = { version = "0.7.18", features = ["codec"] }
+futures = "0.3.32"
 
 [target.'cfg(windows)'.dependencies]
 windows = {
