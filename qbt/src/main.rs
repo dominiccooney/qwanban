@@ -1,10 +1,9 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use image::ImageError;
 
-#[cfg(target_os = "windows")]
-#[path = "pal/windows.rs"]
 mod pal;
 mod video;
+mod input;
 
 #[derive(Parser)]
 #[command(about = "Qwanban native support tools", name = "qbt")]
@@ -17,6 +16,7 @@ struct Cli {
 enum CliCommand {
     Screenshot,
     Video,
+    Input,
 }
 
 #[tokio::main]
@@ -41,6 +41,9 @@ async fn main() {
         },
         Some(CliCommand::Video) => {
             video::offline_encode_video_demo().await.unwrap();
+        }
+        Some(CliCommand::Input) => {
+            input::send_input_demo().await.unwrap();
         }
         None => {
             let mut cmd = Cli::command();
