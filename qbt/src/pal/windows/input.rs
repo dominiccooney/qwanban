@@ -51,7 +51,7 @@ pub(crate) async fn mouse_move_to((end_x, end_y): (i32, i32)) -> anyhow::Result<
 
     for i in 0..steps {
         let t: f64 = -6.0 + 12.0 * i as f64 / steps as f64;
-        let sigma = 1.0 / (1.0 + -t.exp());
+        let sigma = 1.0 / (1.0 + (-t).exp());
         let x = start_x + ((end_x - start_x) as f64 * sigma) as i32;
         let y = start_y + ((end_y - start_y) as f64 * sigma) as i32;
         Mouse::set_position(x, y)?;
