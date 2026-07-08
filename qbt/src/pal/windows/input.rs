@@ -39,15 +39,18 @@ pub(crate) async fn mouse_move_to((x, y): (i32, i32)) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Copy, Clone)]
 pub(crate) enum MouseButton {
     Left,
     Right,
+    Middle,
 }
 
 impl MouseButton {
     fn to_winput(self) -> winput::Button {
         match self {
             MouseButton::Left => winput::Button::Left,
+            MouseButton::Middle => winput::Button::Middle,
             MouseButton::Right => winput::Button::Right,
         }
     }

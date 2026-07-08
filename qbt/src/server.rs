@@ -1,19 +1,21 @@
 // See https://github.com/anthropics/claude-quickstarts/blob/main/computer-use-demo/computer_use_demo/tools/computer.py
 // See https://github.com/anthropics/anthropic-sdk-typescript/blob/4f2eb8071993780d79610b9eda26db96f7653843/src/resources/beta/messages/messages.ts#L3283
 
+use std::time::Duration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
 use futures::{SinkExt, StreamExt};
-use image::ImageFormat;
+use image::{GenericImage, GenericImageView, ImageFormat};
 use crate::pal;
-use crate::pal::ScreenSampler;
+use crate::pal::{MouseButton, ScreenSampler};
 
 #[derive(Deserialize)]
 pub(crate) struct MouseClickParams {
     id: usize,
     key: Option<String>,
+    coordinate: Option<(usize, usize)>,
 }
 
 #[derive(Deserialize)]
@@ -28,7 +30,6 @@ pub(crate) enum ComputerUseRequest {
     MiddleClick(MouseClickParams),
     DoubleClick(MouseClickParams),
     Screenshot { id: usize, },
-
     // *Gets* the cursor position
     CursorPosition { id: usize, },
     LeftMouseDown { id: usize, coordinate: (usize, usize), },
@@ -51,6 +52,42 @@ pub(crate) enum ComputerUseRequest {
     GetDisplayInfo { id: usize, },
 }
 
+impl ComputerUseRequest {
+    fn id(&self) -> usize {
+        match self {
+            ComputerUseRequest::Key { id, .. } => *id,
+            ComputerUseRequest::Type { id, .. } => *id,
+            ComputerUseRequest::MouseMove { id, .. } => *id,
+            ComputerUseRequest::LeftClick(params) |
+            ComputerUseRequest::RightClick(params) |
+            ComputerUseRequest::MiddleClick(params) |
+            ComputerUseRequest::DoubleClick(params) |
+            ComputerUseRequest::TripleClick(params) => params.id,
+            ComputerUseRequest::LeftClickDrag { id, .. } => *id,
+            ComputerUseRequest::Screenshot { id, .. } => *id,
+            ComputerUseRequest::CursorPosition { id, .. } => *id,
+            ComputerUseRequest::LeftMouseDown { id, .. } => *id,
+            ComputerUseRequest::LeftMouseUp { id, .. } => *id,
+            ComputerUseRequest::Scroll { id, .. } => *id,
+            ComputerUseRequest::HoldKey { id, .. } => *id,
+            ComputerUseRequest::Wait { id, .. } => *id,
+            ComputerUseRequest::Zoom { id, .. } => *id,
+            ComputerUseRequest::GetDisplayInfo { id, .. } => *id,
+        }
+    }
+
+    fn mouse_clickiness(&self) -> Option<(MouseButton, usize)> {
+        match self {
+            ComputerUseRequest::LeftClick(params) => Some((MouseButton::Left, 1)),
+            ComputerUseRequest::RightClick(params) => Some((MouseButton::Right, 1)),
+            ComputerUseRequest::MiddleClick(params) => Some((MouseButton::Middle, 1)),
+            ComputerUseRequest::DoubleClick(params) => Some((MouseButton::Left, 2)),
+            ComputerUseRequest::TripleClick(params) => Some((MouseButton::Left, 3)),
+            _ => None
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ScrollDirection {
@@ -69,19 +106,10 @@ pub(crate) struct ComputerUseImage {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ComputerUseResponse {
-    id: usize,
-    ok: bool,
-    text: Option<String>,
-    image: Option<ComputerUseImage>,
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
-pub(crate) enum RequestResponse {
-    Error { id: usize, error: String },
+pub(crate) enum ComputerUseResponse {
+    Error { id: usize, ok: bool, error: String },
+    Empty { id: usize, ok: bool },
     DisplayInfo { id: usize, ok: bool, display: ComputerUseDisplayInfo },
     Text { id: usize, ok: bool, text: String },
     Image { id: usize, ok: bool, image: ComputerUseImage },
@@ -117,23 +145,57 @@ async fn handle_client(socket: TcpStream) -> anyhow::Result<()> {
         eprintln!("request: {}", line);
         match serde_json::from_str::<ComputerUseRequest>(&line) {
             Ok(request) => {
-                handle_request(request, &mut framed).await?;
+                handle_request_report_error(request, &mut framed).await?;
             }
             Err(e) => {
                 eprintln!("invalid request: {:?}", e)
-                // TODO: send some error
+                // We can't respond to these requests because we didn't parse an ID.
             }
         }
     }
     Ok(())
 }
 
+async fn handle_request_report_error(request: ComputerUseRequest, framed: &mut Framed<TcpStream, LinesCodec>) -> anyhow::Result<()> {
+    let id = request.id();
+    if let Err(error) = handle_request(request, framed).await {
+        eprintln!("error handling request: {}", error);
+        framed.send(serde_json::to_string(&ComputerUseResponse::Error {
+            id,
+            ok: false,
+            error: format!("{}", error),
+        })?).await?;
+    }
+    Ok(())
+}
+
+// Note: bounds is x0,y0,x1,y1, *not* width and height.
+async fn reply_screenshot(framed: &mut Framed<TcpStream, LinesCodec>, id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<()> {
+    let screenshot = ScreenSampler::new()?.screenshot()?;
+    let cropped = {
+        let (x0, y0, x1, y1) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        screenshot.view(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image()
+    };
+    let mut png_bytes = Vec::new();
+    cropped.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
+    let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    framed.send(serde_json::to_string(&ComputerUseResponse::Image {
+        id,
+        ok: true,
+        image: ComputerUseImage {
+            data: base64_png_bytes,
+            media_type: "image/png".into(),
+        }
+    })?).await?;
+    Ok(())
+}
+
 async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStream, LinesCodec>) -> anyhow::Result<()> {
-    match request {
+    match &request {
         ComputerUseRequest::GetDisplayInfo { id } => {
             let (width, height) = pal::ScreenSampler::new()?.size_px();
-            framed.send(serde_json::to_string(&RequestResponse::DisplayInfo {
-                id,
+            framed.send(serde_json::to_string(&ComputerUseResponse::DisplayInfo {
+                id: *id,
                 ok: true,
                 display: ComputerUseDisplayInfo {
                     width_px: width,
@@ -141,33 +203,49 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
                 }
             })?).await?;
             Ok(())
-        },
+        }
         ComputerUseRequest::CursorPosition { id } => {
             let (x, y) = pal::ScreenSampler::new()?.cursor_position()?;
-            framed.send(serde_json::to_string(&RequestResponse::Text {
-                id,
+            framed.send(serde_json::to_string(&ComputerUseResponse::Text {
+                id: *id,
                 ok: true,
                 text: format!("X={},Y={}", x, y)
             })?).await?;
             Ok(())
-        },
-        ComputerUseRequest::Screenshot { id } => {
-            let screenshot = ScreenSampler::new()?.screenshot()?;
-            let mut png_bytes = Vec::new();
-            screenshot.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
-            let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-            framed.send(serde_json::to_string(&RequestResponse::Image {
-                id,
+        }
+        ComputerUseRequest::Zoom { id, region } => reply_screenshot(framed, *id, Some(*region)).await,
+        ComputerUseRequest::Wait { id, duration_seconds, } => {
+            tokio::time::sleep(Duration::from_secs_f64(*duration_seconds)).await;
+            reply_screenshot(framed, *id, None).await
+        }
+        ComputerUseRequest::Screenshot { id } => reply_screenshot(framed, *id, None).await,
+        ComputerUseRequest::LeftClick(params) |
+        ComputerUseRequest::RightClick(params) |
+        ComputerUseRequest::MiddleClick(params) |
+        ComputerUseRequest::DoubleClick(params) |
+        ComputerUseRequest::TripleClick(params) => {
+            let MouseClickParams { id, key, coordinate } = params;
+            if let Some(key) = key {
+                todo!("key: {}", key)
+            }
+            if let Some((x, y)) = coordinate {
+                pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            }
+            let (button, click_count) = request.mouse_clickiness().unwrap();
+            for _ in 0..click_count {
+                pal::mouse_down(button).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                pal::mouse_up(button).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
                 ok: true,
-                image: ComputerUseImage {
-                    data: base64_png_bytes,
-                    media_type: "image/png".into(),
-                }
             })?).await?;
             Ok(())
         }
         _ => {
-            anyhow::bail!("NYI request type")
+            anyhow::bail!("not yet implemented")
         }
     }
 }
