@@ -25,6 +25,7 @@ pub(crate) enum ComputerUseRequest {
     Type { id: usize, text: String,},
     MouseMove { id: usize, coordinate: (usize, usize) },
     LeftClick(MouseClickParams),
+    #[serde(rename_all="camelCase")]
     LeftClickDrag { id: usize, start_coordinate: (usize, usize), coordinate: (usize, usize) },
     RightClick(MouseClickParams),
     MiddleClick(MouseClickParams),
@@ -39,9 +40,11 @@ pub(crate) enum ComputerUseRequest {
     Scroll { id: usize, scroll_direction: ScrollDirection, scroll_amount: f64, coordinate: Option<(usize, usize)> },
 
     // TODO: durationSeconds? Ditto for wait below.
+    #[serde(rename_all="camelCase")]
     HoldKey { id: usize, duration_seconds: f64, text: String, },
 
     // Waits -> screenshot
+    #[serde(rename_all="camelCase")]
     Wait { id: usize, duration_seconds: f64, },
     TripleClick(MouseClickParams),
 
@@ -78,11 +81,11 @@ impl ComputerUseRequest {
 
     fn mouse_clickiness(&self) -> Option<(MouseButton, usize)> {
         match self {
-            ComputerUseRequest::LeftClick(params) => Some((MouseButton::Left, 1)),
-            ComputerUseRequest::RightClick(params) => Some((MouseButton::Right, 1)),
-            ComputerUseRequest::MiddleClick(params) => Some((MouseButton::Middle, 1)),
-            ComputerUseRequest::DoubleClick(params) => Some((MouseButton::Left, 2)),
-            ComputerUseRequest::TripleClick(params) => Some((MouseButton::Left, 3)),
+            ComputerUseRequest::LeftClick(_) => Some((MouseButton::Left, 1)),
+            ComputerUseRequest::RightClick(_) => Some((MouseButton::Right, 1)),
+            ComputerUseRequest::MiddleClick(_) => Some((MouseButton::Middle, 1)),
+            ComputerUseRequest::DoubleClick(_) => Some((MouseButton::Left, 2)),
+            ComputerUseRequest::TripleClick(_) => Some((MouseButton::Left, 3)),
             _ => None
         }
     }
@@ -205,7 +208,7 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             Ok(())
         }
         ComputerUseRequest::CursorPosition { id } => {
-            let (x, y) = pal::ScreenSampler::new()?.cursor_position()?;
+            let (x, y) = pal::cursor_position()?;
             framed.send(serde_json::to_string(&ComputerUseResponse::Text {
                 id: *id,
                 ok: true,
@@ -219,6 +222,14 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             reply_screenshot(framed, *id, None).await
         }
         ComputerUseRequest::Screenshot { id } => reply_screenshot(framed, *id, None).await,
+        ComputerUseRequest::MouseMove { id, coordinate: (x, y) } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true
+            })?).await?;
+            Ok(())
+        }
         ComputerUseRequest::LeftClick(params) |
         ComputerUseRequest::RightClick(params) |
         ComputerUseRequest::MiddleClick(params) |
@@ -244,8 +255,46 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             })?).await?;
             Ok(())
         }
-        _ => {
-            anyhow::bail!("not yet implemented")
+        ComputerUseRequest::LeftMouseDown { id, coordinate: (x, y) } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            pal::mouse_down(MouseButton::Left).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
+        }
+        ComputerUseRequest::LeftMouseUp { id, coordinate: (x, y) } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            pal::mouse_up(MouseButton::Left).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
+        }
+        ComputerUseRequest::LeftClickDrag { id, coordinate, start_coordinate } => {
+            pal::mouse_move_to(((*start_coordinate).0 as i32, (*start_coordinate).1 as i32)).await?;
+            pal::mouse_down(MouseButton::Left).await?;
+            pal::mouse_move_to(((*coordinate).0 as i32, (*coordinate).1 as i32)).await?;
+            pal::mouse_up(MouseButton::Left).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
+        }
+        ComputerUseRequest::Type { id, text } => {
+            anyhow::bail!("not yet implemented - type")
+        }
+        ComputerUseRequest::Key { id, text } => {
+            anyhow::bail!("not yet implemented - key")
+        }
+        ComputerUseRequest::HoldKey { id, duration_seconds, text } => {
+            anyhow::bail!("not yet implemented - hold_key")
+        }
+        ComputerUseRequest::Scroll { .. } => {
+            anyhow::bail!("not yet implemented - scroll")
         }
     }
 }
