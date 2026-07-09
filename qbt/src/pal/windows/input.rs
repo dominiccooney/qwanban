@@ -1,18 +1,77 @@
 use std::time::Duration;
+use anyhow::anyhow;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
-use winput::{Mouse, Input};
+use winput::{Mouse, Input, Vk};
 
-pub(crate) type Key = char;
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Key {
+    Alt, // Note, called alt (lowercase) in X11 keysym spelling
+    BackSpace,
+    Ctrl, // Note, called ctrl (lowercase) in X11 keysym spelling
+    Delete,
+    Down,
+    End,
+    Escape,
+    F(usize), // F1..F12
+    Home,
+    Left,
+    PageDown, // Note, called Page_Down in X11 keysym spelling
+    PageUp, // Note, called Page_Up in X11 keysym spelling
+    Return,
+    Right,
+    Shift, // Note, called shift (lowercase) in X11 keysym spelling
+    Super, // Note, called super (lowercase) in X11 keysym spelling
+    Tab,
+    Up,
 
-pub(crate) fn key_for_character(ch: char) -> anyhow::Result<Key> {
-    Ok(ch)
+    Typed(char), // A typed character, e.g. 'a', '/', etc.
 }
 
-pub(crate) fn send_key_down(ch: Key) -> anyhow::Result<()> {
-    let input = match Input::from_char(ch, winput::Action::Press) {
-        None => anyhow::bail!("could not find key for character '{}'", ch),
-        Some(input) => input,
-    };
+pub(crate) fn key_for_character(ch: char) -> anyhow::Result<Key> {
+    Ok(Key::Typed(ch))
+}
+
+fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
+    match key {
+        Key::Typed(ch) => Input::from_char(ch, action).ok_or_else(|| anyhow!("invalid typed character '{}'", ch)),
+
+        Key::Alt => Ok(Input::from_vk(Vk::Alt, action)),
+        Key::BackSpace => Ok(Input::from_vk(Vk::Backspace, action)),
+        Key::Ctrl => Ok(Input::from_vk(Vk::Control, action)),
+        Key::Delete => Ok(Input::from_vk(Vk::Delete, action)),
+        Key::Down => Ok(Input::from_vk(Vk::DownArrow, action)),
+        Key::End => Ok(Input::from_vk(Vk::End, action)),
+        Key::Escape => Ok(Input::from_vk(Vk::Escape, action)),
+        Key::F(n) => Ok(Input::from_vk(match n {
+            1 => Vk::F1,
+            2 => Vk::F2,
+            3 => Vk::F3,
+            4 => Vk::F4,
+            5 => Vk::F5,
+            6 => Vk::F6,
+            7 => Vk::F7,
+            8 => Vk::F8,
+            9 => Vk::F9,
+            10 => Vk::F10,
+            11 => Vk::F11,
+            12 => Vk::F12,
+            _ => unreachable!(),
+        }, action)),
+        Key::Home => Ok(Input::from_vk(Vk::Home, action)),
+        Key::Left => Ok(Input::from_vk(Vk::LeftArrow, action)),
+        Key::PageDown => Ok(Input::from_vk(Vk::PageDown, action)),
+        Key::PageUp => Ok(Input::from_vk(Vk::PageUp, action)),
+        Key::Return => Ok(Input::from_vk(Vk::Enter, action)),
+        Key::Right => Ok(Input::from_vk(Vk::RightArrow, action)),
+        Key::Shift => Ok(Input::from_vk(Vk::Shift, action)),
+        Key::Super => Ok(Input::from_vk(Vk::LeftWin, action)),
+        Key::Tab => Ok(Input::from_vk(Vk::Tab, action)),
+        Key::Up => Ok(Input::from_vk(Vk::UpArrow, action)),
+    }
+}
+
+pub(crate) fn send_key_down(key: Key) -> anyhow::Result<()> {
+    let input = input_of_key(key, winput::Action::Press)?;
     if winput::send_inputs(&[input]) == 1 {
         Ok(())
     } else {
@@ -20,11 +79,8 @@ pub(crate) fn send_key_down(ch: Key) -> anyhow::Result<()> {
     }
 }
 
-pub(crate) fn send_key_up(ch: Key) -> anyhow::Result<()> {
-    let input = match Input::from_char(ch, winput::Action::Release) {
-        None => anyhow::bail!("could not find key for character '{}'", ch),
-        Some(input) => input,
-    };
+pub(crate) fn send_key_up(key: Key) -> anyhow::Result<()> {
+    let input = input_of_key(key, winput::Action::Release)?;
     if winput::send_inputs(&[input]) == 1 {
         Ok(())
     } else {

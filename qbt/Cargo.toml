@@ -17,6 +17,7 @@ serde_json = "1.0"
 tokio-util = { version = "0.7.18", features = ["codec"] }
 futures = "0.3.32"
 base64 = "0.22.1"
+chumsky = "0.13.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = {

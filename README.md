@@ -52,6 +52,7 @@ most containers don't use GPU compositing.
 
 ## TODO
 
-- Computer use: clicks, typing
+- Computer use: mouse jumping for clicks and animation for moves, drags
+- Computer use: keys, typing
 - Render clicks and typing into the video feed
 - MCP wrapper
