@@ -1,7 +1,7 @@
 use std::time::Duration;
 use anyhow::anyhow;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
-use windows::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, GetForegroundWindow, GetWindowThreadProcessId, CURSORINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
 use winput::{Mouse, Input, Vk};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -43,7 +43,12 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
         // These generate keyboard scan codes. They do work in shortcuts, etc.
         // Note, this discards modifiers (alt, shift, etc.).
         Key::Literal(ch) => unsafe {
-            let scan = VkKeyScanW(ch as u16);
+            // Find the keyboard map of the window which will receive input.
+            // If hwnd, thread_id are zero, gets the current thread's layout, which will do.
+            let hwnd = GetForegroundWindow();
+            let thread_id = GetWindowThreadProcessId(hwnd, None);
+            let keyboard_layout = GetKeyboardLayout(thread_id);
+            let scan = VkKeyScanExW(ch as u16, keyboard_layout);
             if scan == -1 {
                 Err(anyhow!("invalid key scan '{}'", scan))
             } else {
@@ -87,6 +92,8 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
     }
 }
 
+// TODO: Without a "henkan" key, or parsing shift specifiers in input_of_key(Key::Literal(...)) it
+// may be difficult for the agent to type some things with CJK keyboard layouts.
 pub(crate) fn send_key_down(key: Key) -> anyhow::Result<()> {
     let input = input_of_key(key, winput::Action::Press)?;
     if winput::send_inputs(&[input]) == 1 {
