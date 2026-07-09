@@ -176,8 +176,8 @@ async fn handle_request_report_error(request: ComputerUseRequest, framed: &mut F
 async fn reply_screenshot(framed: &mut Framed<TcpStream, LinesCodec>, id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<()> {
     let screenshot = ScreenSampler::new()?.screenshot()?;
     let cropped = {
-        let (x0, y0, x1, y1) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
-        screenshot.view(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image()
+        let (x, y, width, height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        screenshot.view(x as u32, y as u32, width as u32, height as u32).to_image()
     };
     let mut png_bytes = Vec::new();
     cropped.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
