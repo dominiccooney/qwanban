@@ -4,16 +4,20 @@ use crate::pal;
 use crate::pal::Key;
 
 pub(crate) async fn send_input_demo() -> anyhow::Result<()> {
-    let keys = vec![pal::Key::Super, pal::Key::Typed('r')];
+    let mut keys = vec![pal::Key::Super, Key::Literal('.')];
+    eprintln!("keys pressing for {:?}", keys);
     for key in &keys {
-        pal::send_key_down(*key);
+        pal::send_key_down(*key)?;
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    for key in keys {
-        pal::send_key_up(key);
+    keys.reverse();
+    eprintln!("keys pressed");
+    for key in keys.into_iter() {
+        pal::send_key_up(key)?;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    eprintln!("keys up");
 
     let (start_x, start_y) = (10.0, 400.0);
     pal::mouse_move_to((start_x as i32, start_y as i32)).await?;
@@ -58,11 +62,11 @@ fn key_parser<'src>() -> impl Parser<'src, &'src str, Vec<Key>, extra::Err<Rich<
                     }
                 })
         });
-    let typed_key = any().map(|ch| Key::Typed(ch));
+    let literal_key = any().map(|ch| Key::Literal(ch));
     let key = choice([
         special_key.boxed(),
         function_key.boxed(),
-        typed_key.boxed(),
+        literal_key.boxed(),
     ]);
     let plus_delimiter = just('+');
     key.separated_by(plus_delimiter).at_least(1).collect::<Vec<_>>()
@@ -81,7 +85,7 @@ pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
 
 // Presses the specified keys, then releases them. Returns after the keys have been be released.
 pub(crate) async fn press_release_keys(keys: &str) -> anyhow::Result<()> {
-    let keys = match key_parser().parse(keys).into_result() {
+    let mut keys = match key_parser().parse(keys).into_result() {
         Err(es) => anyhow::bail!("{:?}", es),
         Ok(keys) => keys
     };
@@ -90,6 +94,7 @@ pub(crate) async fn press_release_keys(keys: &str) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(6)).await;
     }
     tokio::time::sleep(Duration::from_millis(16)).await;
+    keys.reverse();
     for key in keys {
         pal::send_key_up(key)?;
         tokio::time::sleep(Duration::from_millis(4)).await;

@@ -1,6 +1,7 @@
 use std::time::Duration;
 use anyhow::anyhow;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
 use winput::{Mouse, Input, Vk};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -25,6 +26,7 @@ pub(crate) enum Key {
     Up,
 
     Typed(char), // A typed character, e.g. 'a', '/', etc.
+    Literal(char), // A character used in a chord, e.g. the 'a' in ctrl+a
 }
 
 pub(crate) fn key_for_character(ch: char) -> anyhow::Result<Key> {
@@ -33,7 +35,22 @@ pub(crate) fn key_for_character(ch: char) -> anyhow::Result<Key> {
 
 fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
     match key {
+        // These generate KEYEVENTF_UNICODE 'keys' which aren't real key codes. These send text
+        // (in the 0-0xffff range) with good fidelity regardless of keyboard layout, but they are
+        // not keyboard keys. Games, shortcuts, etc. do not understand these events.
         Key::Typed(ch) => Input::from_char(ch, action).ok_or_else(|| anyhow!("invalid typed character '{}'", ch)),
+
+        // These generate keyboard scan codes. They do work in shortcuts, etc.
+        // Note, this discards modifiers (alt, shift, etc.).
+        Key::Literal(ch) => unsafe {
+            let scan = VkKeyScanW(ch as u16);
+            if scan == -1 {
+                Err(anyhow!("invalid key scan '{}'", scan))
+            } else {
+                let vk_code = (scan & 0xff) as u8;
+                Ok(Input::from_vk(Vk::from_u8(vk_code), action))
+            }
+        }
 
         Key::Alt => Ok(Input::from_vk(Vk::Alt, action)),
         Key::BackSpace => Ok(Input::from_vk(Vk::Backspace, action)),
@@ -64,7 +81,7 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
         Key::Return => Ok(Input::from_vk(Vk::Enter, action)),
         Key::Right => Ok(Input::from_vk(Vk::RightArrow, action)),
         Key::Shift => Ok(Input::from_vk(Vk::Shift, action)),
-        Key::Super => Ok(Input::from_vk(Vk::RightWin, action)),
+        Key::Super => Ok(Input::from_vk(Vk::LeftWin, action)),
         Key::Tab => Ok(Input::from_vk(Vk::Tab, action)),
         Key::Up => Ok(Input::from_vk(Vk::UpArrow, action)),
     }
