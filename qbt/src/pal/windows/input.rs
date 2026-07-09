@@ -64,7 +64,7 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
         Key::Return => Ok(Input::from_vk(Vk::Enter, action)),
         Key::Right => Ok(Input::from_vk(Vk::RightArrow, action)),
         Key::Shift => Ok(Input::from_vk(Vk::Shift, action)),
-        Key::Super => Ok(Input::from_vk(Vk::LeftWin, action)),
+        Key::Super => Ok(Input::from_vk(Vk::RightWin, action)),
         Key::Tab => Ok(Input::from_vk(Vk::Tab, action)),
         Key::Up => Ok(Input::from_vk(Vk::UpArrow, action)),
     }
