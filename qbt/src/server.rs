@@ -8,7 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
 use futures::{SinkExt, StreamExt};
 use image::{GenericImage, GenericImageView, ImageFormat};
-use crate::pal;
+use crate::{input, pal};
 use crate::pal::{MouseButton, ScreenSampler};
 
 #[derive(Deserialize)]
@@ -285,13 +285,29 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             Ok(())
         }
         ComputerUseRequest::Type { id, text } => {
-            anyhow::bail!("not yet implemented - type")
+            input::type_text(text).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
         }
         ComputerUseRequest::Key { id, text } => {
-            anyhow::bail!("not yet implemented - key")
+            input::press_release_keys(text).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
         }
         ComputerUseRequest::HoldKey { id, duration_seconds, text } => {
-            anyhow::bail!("not yet implemented - hold_key")
+            input::hold_keys(text, Duration::from_secs_f64(*duration_seconds)).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Text {
+                id: *id,
+                ok: true,
+                text: "The specified delay will complete asynchronously.".into(),
+            })?).await?;
+            Ok(())
         }
         ComputerUseRequest::Scroll { .. } => {
             anyhow::bail!("not yet implemented - scroll")

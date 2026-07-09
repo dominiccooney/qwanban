@@ -71,8 +71,37 @@ fn key_parser<'src>() -> impl Parser<'src, &'src str, Vec<Key>, extra::Err<Rich<
     key.separated_by(plus_delimiter).at_least(1).collect::<Vec<_>>()
 }
 
-// Presses the specified keys, then releases them after duration. Does not wait for the duration
-// to elapse.
+pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
+    for ch in text.chars().into_iter() {
+        let key = pal::key_for_character(ch)?;
+        pal::send_key_down(key)?;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        pal::send_key_up(key)?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    Ok(())
+}
+
+// Presses the specified keys, then releases them. Returns after the keys have been be released.
+pub(crate) async fn press_release_keys(keys: &str) -> anyhow::Result<()> {
+    let keys = match key_parser().parse(keys).into_result() {
+        Err(es) => anyhow::bail!("{:?}", es),
+        Ok(keys) => keys
+    };
+    for key in &keys {
+        pal::send_key_down(*key)?;
+        tokio::time::sleep(Duration::from_millis(6)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(16)).await;
+    for key in keys {
+        pal::send_key_up(key)?;
+        tokio::time::sleep(Duration::from_millis(4)).await;
+    }
+    Ok(())
+}
+
+// Presses the specified keys and returns. Asynchronously, after the specified duration has elapsed,
+// releases the keys.
 pub(crate) async fn hold_keys(keys: &str, duration: Duration) -> anyhow::Result<()> {
     let keys = match key_parser().parse(keys).into_result() {
         Err(es) => anyhow::bail!("{:?}", es),
