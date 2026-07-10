@@ -1,10 +1,34 @@
 use std::time::Duration;
 use chumsky::prelude::*;
 use crate::pal;
-use crate::pal::Key;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Key {
+    Alt, // Note, called alt (lowercase) in X11 keysym spelling
+    BackSpace,
+    Ctrl, // Note, called ctrl (lowercase) in X11 keysym spelling
+    Delete,
+    Down,
+    End,
+    Escape,
+    F(usize), // F1..F12
+    Home,
+    Left,
+    PageDown, // Note, called Page_Down in X11 keysym spelling
+    PageUp, // Note, called Page_Up in X11 keysym spelling
+    Return,
+    Right,
+    Shift, // Note, called shift (lowercase) in X11 keysym spelling
+    Super, // Note, called super (lowercase) in X11 keysym spelling
+    Tab,
+    Up,
+
+    Typed(char), // A typed character, e.g. 'a', '/', etc.
+    Literal(char), // A character used in a chord, e.g. the 'a' in ctrl+a
+}
 
 pub(crate) async fn send_input_demo() -> anyhow::Result<()> {
-    let mut keys = vec![pal::Key::Super, Key::Literal('.')];
+    let mut keys = vec![Key::Super, Key::Literal('.')];
     eprintln!("keys pressing for {:?}", keys);
     for key in &keys {
         pal::send_key_down(*key)?;
@@ -74,12 +98,34 @@ fn key_parser<'src>() -> impl Parser<'src, &'src str, Vec<Key>, extra::Err<Rich<
 
 pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
     for ch in text.chars().into_iter() {
-        let key = pal::key_for_character(ch)?;
+        let key = Key::Typed(ch);
         pal::send_key_down(key)?;
         tokio::time::sleep(Duration::from_millis(60)).await;
         pal::send_key_up(key)?;
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
+    Ok(())
+}
+
+async fn per_key<F: Fn(Key) -> anyhow::Result<()>>(keys: &str, fun: F) -> anyhow::Result<()> {
+    let keys = match key_parser().parse(keys).into_result() {
+        Err(es) => anyhow::bail!("{:?}", es),
+        Ok(keys) => keys
+    };
+    for key in &keys {
+        fun(*key)?;
+        tokio::time::sleep(Duration::from_millis(6)).await;
+    }
+    Ok(())
+}
+
+pub(crate) async fn press_keys(keys: &str) -> anyhow::Result<()> {
+    per_key(keys, pal::send_key_down).await?;
+    Ok(())
+}
+
+pub(crate) async fn release_keys(keys: &str) -> anyhow::Result<()> {
+    per_key(keys, pal::send_key_up).await?;
     Ok(())
 }
 

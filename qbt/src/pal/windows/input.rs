@@ -2,36 +2,10 @@ use std::time::Duration;
 use anyhow::anyhow;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, GetForegroundWindow, GetWindowThreadProcessId, CURSORINFO};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
-use winput::{Mouse, Input, Vk};
+use winput::{Mouse, Input, Vk, WheelDirection};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Key {
-    Alt, // Note, called alt (lowercase) in X11 keysym spelling
-    BackSpace,
-    Ctrl, // Note, called ctrl (lowercase) in X11 keysym spelling
-    Delete,
-    Down,
-    End,
-    Escape,
-    F(usize), // F1..F12
-    Home,
-    Left,
-    PageDown, // Note, called Page_Down in X11 keysym spelling
-    PageUp, // Note, called Page_Up in X11 keysym spelling
-    Return,
-    Right,
-    Shift, // Note, called shift (lowercase) in X11 keysym spelling
-    Super, // Note, called super (lowercase) in X11 keysym spelling
-    Tab,
-    Up,
-
-    Typed(char), // A typed character, e.g. 'a', '/', etc.
-    Literal(char), // A character used in a chord, e.g. the 'a' in ctrl+a
-}
-
-pub(crate) fn key_for_character(ch: char) -> anyhow::Result<Key> {
-    Ok(Key::Typed(ch))
-}
+use crate::input::Key;
+use crate::server::ScrollDirection;
 
 fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
     match key {
@@ -159,7 +133,6 @@ impl MouseButton {
     }
 }
 
-// TODO: Modifier clicks.
 pub(crate) async fn mouse_down(button: MouseButton) -> anyhow::Result<()> {
     let input = Input::from_button(button.to_winput(), winput::Action::Press);
     if winput::send_inputs(&[input]) == 1 {
@@ -171,6 +144,24 @@ pub(crate) async fn mouse_down(button: MouseButton) -> anyhow::Result<()> {
 
 pub(crate) async fn mouse_up(button: MouseButton) -> anyhow::Result<()> {
     let input = Input::from_button(button.to_winput(), winput::Action::Release);
+    if winput::send_inputs(&[input]) == 1 {
+        Ok(())
+    } else {
+        Err(winput::WindowsError::from_last_error().into())
+    }
+}
+
+pub(crate) async fn mouse_scroll(clicks: &f64, direction: &ScrollDirection) -> anyhow::Result<()> {
+    let sign = match direction {
+        ScrollDirection::Up | ScrollDirection::Left => -1.0,
+        ScrollDirection::Down | ScrollDirection::Right => 1.0,
+    };
+    let input = Input::from_wheel((sign * *clicks) as f32, match direction {
+        ScrollDirection::Up |
+        ScrollDirection::Down => WheelDirection::Vertical,
+        ScrollDirection::Left |
+        ScrollDirection::Right => WheelDirection::Horizontal,
+    });
     if winput::send_inputs(&[input]) == 1 {
         Ok(())
     } else {

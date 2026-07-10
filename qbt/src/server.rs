@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
 use futures::{SinkExt, StreamExt};
-use image::{GenericImage, GenericImageView, ImageFormat};
+use image::{GenericImageView, ImageFormat};
 use crate::{input, pal};
 use crate::pal::{MouseButton, ScreenSampler};
 
@@ -39,7 +39,6 @@ pub(crate) enum ComputerUseRequest {
     #[serde(rename_all="camelCase")]
     Scroll { id: usize, scroll_direction: ScrollDirection, scroll_amount: f64, coordinate: Option<(usize, usize)> },
 
-    // TODO: durationSeconds? Ditto for wait below.
     #[serde(rename_all="camelCase")]
     HoldKey { id: usize, duration_seconds: f64, text: String, },
 
@@ -237,7 +236,7 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
         ComputerUseRequest::TripleClick(params) => {
             let MouseClickParams { id, key, coordinate } = params;
             if let Some(key) = key {
-                todo!("key: {}", key)
+                input::press_keys(key).await?;
             }
             if let Some((x, y)) = coordinate {
                 pal::mouse_move_to((*x as i32, *y as i32)).await?;
@@ -248,6 +247,9 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 pal::mouse_up(button).await?;
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            if let Some(key) = key {
+                input::release_keys(key).await?;
             }
             framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
                 id: *id,
@@ -309,8 +311,16 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             })?).await?;
             Ok(())
         }
-        ComputerUseRequest::Scroll { .. } => {
-            anyhow::bail!("not yet implemented - scroll")
+        ComputerUseRequest::Scroll { id, scroll_amount, scroll_direction, coordinate } => {
+            if let Some((x, y)) = coordinate {
+                pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            }
+            pal::mouse_scroll(scroll_amount, scroll_direction).await?;
+            framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                id: *id,
+                ok: true,
+            })?).await?;
+            Ok(())
         }
     }
 }

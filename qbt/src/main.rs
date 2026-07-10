@@ -1,5 +1,4 @@
 use clap::{CommandFactory, Parser, Subcommand};
-use image::ImageError;
 
 mod pal;
 mod video;
