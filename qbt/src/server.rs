@@ -175,7 +175,9 @@ async fn handle_request_report_error(request: ComputerUseRequest, framed: &mut F
 async fn reply_screenshot(framed: &mut Framed<TcpStream, LinesCodec>, id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<()> {
     let screenshot = ScreenSampler::new()?.screenshot()?;
     let cropped = {
-        let (x, y, width, height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        let (x, y, mut width, mut height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        width = std::cmp::min(width, screenshot.width() as usize - x);
+        height = std::cmp::min(height, screenshot.height() as usize - y);
         screenshot.view(x as u32, y as u32, width as u32, height as u32).to_image()
     };
     let mut png_bytes = Vec::new();
@@ -215,7 +217,13 @@ async fn handle_request(request: ComputerUseRequest, framed: &mut Framed<TcpStre
             })?).await?;
             Ok(())
         }
-        ComputerUseRequest::Zoom { id, region } => reply_screenshot(framed, *id, Some(*region)).await,
+        ComputerUseRequest::Zoom { id, region } => {
+            let (x0, y0, x1, y1) = *region;
+            let (x0, x1) = (std::cmp::min(x0, x1), std::cmp::max(x0, x1));
+            let (y0, y1) = (std::cmp::min(y0, y1), std::cmp::max(y0, y1));
+            let (width, height) = (x1 - x0, y1 - y0);
+            reply_screenshot(framed, *id, Some((x0, y0, width, height))).await
+        },
         ComputerUseRequest::Wait { id, duration_seconds, } => {
             tokio::time::sleep(Duration::from_secs_f64(*duration_seconds)).await;
             reply_screenshot(framed, *id, None).await

@@ -24,6 +24,17 @@ $env:VPX_INCLUDE_DIR = "${pwd}\installed\x64-windows\include"
 $env:VPX_VERSION = "1.16.0" # use vcpkg list to confirm this version
 ```
 
+To summarize, set up the environment:
+
+```powershell
+$env:LIBCLANG_PATH = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin"
+cd ..\vcpkg
+$env:VPX_LIB_DIR = "${pwd}\installed\x64-windows\lib"
+$env:VPX_INCLUDE_DIR = "${pwd}\installed\x64-windows\include"
+$env:VPX_VERSION = "1.16.0"
+cd ..\qwanban
+```
+
 Finally, run the server:
 
 ```powershell
