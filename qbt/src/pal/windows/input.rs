@@ -5,7 +5,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanEx
 use winput::{Mouse, Input, Vk, WheelDirection};
 
 use crate::input::Key;
-use crate::server::ScrollDirection;
+use crate::computer_use::ScrollDirection;
 
 fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
     match key {

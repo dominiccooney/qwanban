@@ -46,7 +46,7 @@ Get https://github.com/cline/cline branch dpc/computer-use, and:
 ```powershell
 bun install
 bun build:sdk
-cd app/cli
+cd apps/cli
 $Env:CLINE_COMPUTER_USE_PORT=1234
 $Env:CLINE_HUB_PORT=5555
 bun run dev
@@ -63,7 +63,6 @@ most containers don't use GPU compositing.
 
 ## TODO
 
-- Computer use: mouse jumping for clicks and animation for moves, drags
-- Computer use: keys, typing
+- Computer use: mouse jumping for clicks but animation for moves, drags
 - Render clicks and typing into the video feed
 - MCP wrapper

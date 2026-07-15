@@ -7,7 +7,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect,
 };
 
-type ScreenshotImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
+pub(crate) type ScreenshotImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
 
 struct DesktopDC {
     hwnd: HWND,

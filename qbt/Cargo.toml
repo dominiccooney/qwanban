@@ -18,6 +18,8 @@ tokio-util = { version = "0.7.18", features = ["codec"] }
 futures = "0.3.32"
 base64 = "0.22.1"
 chumsky = "0.13.0"
+tokio-tungstenite = "0.30.0"
+futures-util = "0.3.32"
 
 [target.'cfg(windows)'.dependencies]
 windows = {

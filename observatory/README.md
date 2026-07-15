@@ -15,7 +15,7 @@ To recreate this project with the same configuration:
 
 ```sh
 # recreate this project
-bun x sv@0.16.2 create --template minimal --types ts --add mcp="ide:other+setup:local" tailwindcss="plugins:none" playwright eslint prettier --install bun observatory
+bun x sv@0.16.2 create --template minimal --types ts --add mcp="ide:other+setup:local" playwright eslint prettier --install bun observatory
 ```
 
 ## Developing
