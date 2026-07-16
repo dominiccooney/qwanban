@@ -2,10 +2,11 @@
     import {type Host, HostState} from "$lib/Host.svelte";
 
 type Props = {
-    host: Host
+    host: Host,
+    controls: unknown,
 };
 
-let { host }: Props = $props();
+let { host, controls }: Props = $props();
 
 function labelForState(state: HostState) {
     switch (state) {
@@ -25,8 +26,9 @@ let state: string = $derived(labelForState(host.state));
 </script>
 
 <div>
-{host.name} ({state})
 <button onclick={() => host.send("TakeScreenshot")}>📸</button>
+{@render controls()}
+{host.name} ({state})
 <br>
-<img src={host.screenshot} alt="Latest screenshot" width="50%">
+<img src={host.screenshot} alt="Latest screenshot" width="100%">
 </div>

@@ -43,15 +43,22 @@ $effect(() => {
 let hostTextInput: HTMLInputElement;
 let hostText : string = $state('');
 </script>
+<style>
+#screen-grid {
+    display: grid;
+    grid-template-columns: 33% 33% 33%;
+}
+</style>
 <h1>Observatory</h1>
 <input bind:this={hostTextInput} type="text" bind:value={hostText} use:autofocus>
 <button onclick={() => { addHost(hostText); hostText = ''; hostTextInput.focus(); }}>Add Host</button>
 <p>{hosts.size} host(s)</p>
-<ul>
+<div id="screen-grid">
 {#each hosts.values() as host (host.name)}
-    <li>
-        <button onclick={() => removeHost(host.name)}>&cross;</button>
-        <HostChit {host} />
-    </li>
+    <HostChit {host}>
+        {#snippet controls()}
+            <button onclick={() => removeHost(host.name)}>&cross;</button>
+        {/snippet}
+    </HostChit>
 {/each}
-</ul>
+</div>

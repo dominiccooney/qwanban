@@ -36,7 +36,7 @@ impl Observed {
     }
 
     pub(crate) async fn serve_ws(&mut self, port: u16) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         println!("WebSocket server listening on port: {}", port);
         loop {
             tokio::select! {
