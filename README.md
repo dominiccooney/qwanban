@@ -38,7 +38,7 @@ cd ..\qwanban
 Finally, run the server:
 
 ```powershell
-cargo run -- serve 1234
+cargo run -- serve 1234 5678
 ```
 
 Get https://github.com/cline/cline branch dpc/computer-use, and:
@@ -49,6 +49,7 @@ bun build:sdk
 cd apps/cli
 $Env:CLINE_COMPUTER_USE_PORT=1234
 $Env:CLINE_HUB_PORT=5555
+$Env:CLINE_COMPUTER_USER_MODEL = "claude-sonnet-5"
 bun run dev
 ```
 
