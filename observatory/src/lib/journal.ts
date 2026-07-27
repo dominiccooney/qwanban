@@ -68,6 +68,8 @@ export function summarize(event: JournalEvent): string {
 			return `question: ${inner.question}`;
 		case 'helper.status_changed':
 			return `status → ${inner.to}`;
+		case 'session.status_changed':
+			return `${laneOf(event) === 'driver' ? 'driver' : 'computer user'} → ${inner.status}`;
 		case 'session.started':
 			return `session started (${inner.role})`;
 		default:
@@ -97,4 +99,68 @@ export function roleOf(event: JournalEvent): string {
 
 export function formatTime(atMs: number): string {
 	return new Date(atMs).toLocaleTimeString();
+}
+
+/** "5 seconds ago", "3 minutes ago", ... — staleness at a glance. */
+export function formatAgo(atMs: number, nowMs: number): string {
+	const seconds = Math.max(0, Math.round((nowMs - atMs) / 1000));
+	const units: [number, string][] = [
+		[86400, 'day'],
+		[3600, 'hour'],
+		[60, 'minute'],
+		[1, 'second'],
+	];
+	for (const [size, name] of units) {
+		if (seconds >= size || size === 1) {
+			const count = Math.floor(seconds / size);
+			return `${count} ${name}${count === 1 ? '' : 's'} ago`;
+		}
+	}
+	return 'now';
+}
+
+export interface AgentStatuses {
+	driver?: string;
+	computerUser?: string;
+}
+
+/**
+ * The latest run status each agent reported (`session.status_changed`),
+ * e.g. running / completed / aborted / failed.
+ */
+export function latestAgentStatuses(events: JournalEvent[]): AgentStatuses {
+	const statuses: AgentStatuses = {};
+	// Newest-first: the first status seen per lane wins.
+	for (let i = events.length - 1; i >= 0; i--) {
+		const event = events[i];
+		if (event.kind !== 'session.status_changed') {
+			continue;
+		}
+		const lane = laneOf(event);
+		const status = String((event.payload as ArtifactEventPayload).payload?.status ?? '');
+		if (lane === 'driver' && statuses.driver === undefined) {
+			statuses.driver = status;
+		} else if (lane === 'computer_user' && statuses.computerUser === undefined) {
+			statuses.computerUser = status;
+		}
+		if (statuses.driver !== undefined && statuses.computerUser !== undefined) {
+			break;
+		}
+	}
+	return statuses;
+}
+
+/** The click/drag coordinate of a computer action, for image annotation. */
+export function clickCoordinateOf(
+	event: JournalEvent
+): { x: number; y: number } | undefined {
+	if (event.kind !== 'computer.action') {
+		return undefined;
+	}
+	const request = event.payload.request as Record<string, unknown> | undefined;
+	const coordinate = request?.coordinate;
+	if (Array.isArray(coordinate) && coordinate.length === 2) {
+		return { x: Number(coordinate[0]), y: Number(coordinate[1]) };
+	}
+	return undefined;
 }

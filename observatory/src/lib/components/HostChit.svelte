@@ -1,7 +1,8 @@
 <script lang="ts">
 import type { Snippet } from 'svelte';
 import { type Host, HostState } from '$lib/Host.svelte';
-import { formatTime, summarize } from '$lib/journal';
+import { formatAgo, latestAgentStatuses, summarize } from '$lib/journal';
+import { clock } from '$lib/now.svelte';
 
 type Props = {
 	host: Host;
@@ -38,11 +39,15 @@ let latestScreenshotUrl: string | undefined = $derived.by(() => {
 	const id = host.latestScreenshotEvent?.screenshotId;
 	return id ? host.screenshots.get(id) : undefined;
 });
-// The glance line: the most recent activity on this host.
+// The glance line: the most recent activity on this host. Relative time
+// (via the ticking clock) makes a hung agent stand out.
 let latestActivity: string = $derived.by(() => {
 	const event = host.latestEvent;
-	return event ? `${formatTime(event.atMs)} ${summarize(event)}` : 'no activity yet';
+	return event
+		? `${summarize(event)} — ${formatAgo(event.atMs, clock.value)}`
+		: 'no activity yet';
 });
+let statuses = $derived(latestAgentStatuses(host.events));
 </script>
 
 <style>
@@ -59,6 +64,22 @@ let latestActivity: string = $derived.by(() => {
 	text-overflow: ellipsis;
 	display: block;
 }
+.statuses {
+	display: block;
+	font-size: 0.85em;
+}
+.status {
+	display: inline-block;
+	border-radius: 3px;
+	padding: 0 0.4em;
+	margin-right: 0.4em;
+	background: #eee;
+	color: #555;
+}
+.status.running {
+	background: #d2f8d2;
+	color: #1a6b1a;
+}
 .screenshot-button {
 	display: block;
 	width: 100%;
@@ -74,6 +95,14 @@ let latestActivity: string = $derived.by(() => {
 	<button onclick={onOpen}>📜</button>
 	{@render controls()}
 	{host.name} ({state}) — {host.events.length} event(s)
+	<span class="statuses">
+		<span class="status" class:running={statuses.driver === 'running'}>
+			driver: {statuses.driver ?? '—'}
+		</span>
+		<span class="status" class:running={statuses.computerUser === 'running'}>
+			computer user: {statuses.computerUser ?? '—'}
+		</span>
+	</span>
 	<span class="activity">{latestActivity}</span>
 	{#if latestScreenshotUrl}
 		<button class="screenshot-button" onclick={onOpen}>
