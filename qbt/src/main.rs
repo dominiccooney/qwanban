@@ -1,10 +1,9 @@
 use clap::{CommandFactory, Parser, Subcommand};
 
-mod pal;
-mod video;
-mod input;
 mod computer_use;
+mod input;
 mod observed;
+mod pal;
 mod server;
 
 #[derive(Parser)]
@@ -17,7 +16,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum CliCommand {
     Screenshot,
-    Video,
     Input,
     Serve { port: u16, ws_port: Option<u16> },
 }
@@ -30,13 +28,8 @@ async fn main() -> anyhow::Result<()> {
             let sampler = pal::ScreenSampler::new()?;
             sampler.screenshot()?.save("screenshot.png")?;
             Ok(())
-        },
-        Some(CliCommand::Video) => {
-            video::offline_encode_video_demo().await
         }
-        Some(CliCommand::Input) => {
-            input::send_input_demo().await
-        }
+        Some(CliCommand::Input) => input::send_input_demo().await,
         Some(CliCommand::Serve { port, ws_port }) => {
             let server = server::Server::new(*port, *ws_port);
             eprintln!("ctrl-c to quit.");

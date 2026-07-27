@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn parse_keystroke() {
-        assert_eq!(key_parser().parse("a").into_result(), Ok(vec![Key::Typed('a')]));
+        assert_eq!(key_parser().parse("a").into_result(), Ok(vec![Key::Literal('a')]));
     }
 
     #[test]
