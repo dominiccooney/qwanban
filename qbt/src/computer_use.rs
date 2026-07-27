@@ -7,9 +7,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
+use tokio_util::sync::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use image::{GenericImageView, ImageFormat};
-use tokio::sync::Mutex;
+use crate::journal::Journal;
 use crate::{input, pal};
 use crate::pal::{MouseButton, ScreenSampler};
 
@@ -54,6 +55,12 @@ pub(crate) enum ComputerUseRequest {
 
     // Not Claude events
     GetDisplayInfo { id: usize, },
+
+    /// The agent publishes one of its own events (transcript message,
+    /// coordinator status change, ...) into the journal for the observatory.
+    /// `kind` namespaces the event (e.g. "transcript.message"); `payload` is
+    /// passed through to observers untouched.
+    PublishEvent { id: usize, kind: String, payload: serde_json::Value },
 }
 
 impl ComputerUseRequest {
@@ -77,6 +84,7 @@ impl ComputerUseRequest {
             ComputerUseRequest::Wait { id, .. } => *id,
             ComputerUseRequest::Zoom { id, .. } => *id,
             ComputerUseRequest::GetDisplayInfo { id, .. } => *id,
+            ComputerUseRequest::PublishEvent { id, .. } => *id,
         }
     }
 
@@ -126,147 +134,185 @@ pub(crate) struct ComputerUseDisplayInfo {
     height_px: usize,
 }
 
-pub(crate) enum ComputerUseToServerMessage {
-    // The agent took a screenshot.
-    TookScreenshot(pal::ScreenshotImage),
-}
-
-pub(crate) enum ServerToComputerUseMessage {
-    // Request the client to take a screenshot.
-    TakeScreenshot(tokio::sync::oneshot::Sender<anyhow::Result<pal::ScreenshotImage>>),
-}
-
-struct Inner {
-    from_server: tokio::sync::mpsc::Receiver<ServerToComputerUseMessage>,
-}
-
-pub(crate) struct ComputerUse {
-    to_server: tokio::sync::mpsc::Sender<ComputerUseToServerMessage>,
-    inner: Arc<Mutex<Inner>>,
-}
-
-impl ComputerUse {
-    pub(crate) fn new(to_server: tokio::sync::mpsc::Sender<ComputerUseToServerMessage>, from_server: tokio::sync::mpsc::Receiver<ServerToComputerUseMessage>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Inner { from_server })),
-            to_server,
-        }
-    }
-
-    /// Starts a JSONL socket server for computer use. When the write end of the owning server's
-    /// channel is closed, this server shuts down.
-    pub(crate) async fn start_jsonl_socket_server(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-        println!("Listening on {}", port);
-        loop {
-            let self_clone = self.clone();
-            let mut inner = self.inner.lock().await;
-            tokio::select! {
-                Ok((socket, _)) = listener.accept() => {
-                    // TODO: Connected clients aren't shut down as the server shuts down; extent the protocol to them.
-                    tokio::spawn(async move {
-                        if let Err(e) = self_clone.handle_client(socket).await {
-                            eprintln!("Error handling client: {}", e);
+/// Serves the agent's JSONL socket. One agent at a time, most-recent-wins:
+/// accepting a new connection cancels the previous client's task and awaits
+/// it before the new client is served, so a restarted CLI can always
+/// reconnect and two agents can never interleave input events. Runs until
+/// `shutdown` cancels.
+pub(crate) async fn serve_agent(
+    listener: TcpListener,
+    journal: Arc<Journal>,
+    shutdown: CancellationToken,
+) {
+    let mut active_client: Option<(CancellationToken, tokio::task::JoinHandle<()>)> = None;
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((socket, peer)) => {
+                        eprintln!("agent connected: {}", peer);
+                        if let Some((cancel, handle)) = active_client.take() {
+                            cancel.cancel();
+                            // Cancellation is observed between requests, so an
+                            // in-flight action (even a long `wait`) completes
+                            // before the new agent is served. Slow, but it is
+                            // what keeps two agents from interleaving input.
+                            let _ = handle.await;
                         }
-                    });
-                }
-                Err(err) = listener.accept() => {
-                    eprintln!("Error accepting socket: {}", err);
-                    break;
-                }
-                message = inner.from_server.recv() => {
-                    match message {
-                        Some(ServerToComputerUseMessage::TakeScreenshot(reply)) => {
-                            // TODO: We could drop the result of the floor instead of failing here.
-                            reply.send(ScreenSampler::new()?.screenshot()).unwrap();
-                        }
-                        None => {
-                            eprintln!("computer use server shutting down due to tap from server");
-                            break;
-                        }
+                        let cancel = shutdown.child_token();
+                        let handle = tokio::spawn(handle_agent_client(socket, journal.clone(), cancel.clone()));
+                        active_client = Some((cancel, handle));
+                    }
+                    Err(err) => {
+                        eprintln!("error accepting agent socket: {}", err);
                     }
                 }
             }
+            _ = shutdown.cancelled() => break,
         }
-        Ok(())
     }
+    if let Some((cancel, handle)) = active_client.take() {
+        cancel.cancel();
+        let _ = handle.await;
+    }
+}
 
-    async fn handle_client(&self, socket: TcpStream) -> anyhow::Result<()> {
-        let mut framed = Framed::new(socket, LinesCodec::new());
-        while let Some(result) = framed.next().await {
-            let line = result?;
-            if line.trim().is_empty() {
+async fn handle_agent_client(socket: TcpStream, journal: Arc<Journal>, cancel: CancellationToken) {
+    let mut framed = Framed::new(socket, LinesCodec::new());
+    loop {
+        let line = tokio::select! {
+            _ = cancel.cancelled() => break,
+            next = framed.next() => match next {
+                None => break,
+                Some(Err(err)) => {
+                    eprintln!("agent connection error: {}", err);
+                    break;
+                }
+                Some(Ok(line)) => line,
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("unparseable request: {}", err);
                 continue;
             }
-            eprintln!("request: {}", line);
-            match serde_json::from_str::<ComputerUseRequest>(&line) {
-                Ok(request) => {
-                    self.handle_request_report_error(request, &mut framed).await?;
-                }
-                Err(e) => {
-                    eprintln!("invalid request: {:?}", e)
-                    // We can't respond to these requests because we didn't parse an ID.
-                }
-            }
+        };
+        let response = respond_and_journal(value, &journal).await;
+        let Ok(text) = serde_json::to_string(&response) else {
+            eprintln!("failed to serialize response");
+            continue;
+        };
+        if let Err(err) = framed.send(text).await {
+            eprintln!("failed to send response: {}", err);
+            break;
         }
-        Ok(())
     }
+}
 
-    async fn handle_request_report_error(&self, request: ComputerUseRequest, framed: &mut Framed<TcpStream, LinesCodec>) -> anyhow::Result<()> {
-        let id = request.id();
-        if let Err(error) = self.handle_request(request, framed).await {
-            eprintln!("error handling request: {}", error);
-            framed.send(serde_json::to_string(&ComputerUseResponse::Error {
+/// Executes one request and journals it. Every request produces exactly one
+/// journal entry and one response: computer actions are journaled here (qbt
+/// is the only component that sees them all, in execution order) while
+/// `publish_event` journals the agent's own event under its published kind.
+async fn respond_and_journal(value: serde_json::Value, journal: &Journal) -> ComputerUseResponse {
+    let request: ComputerUseRequest = match serde_json::from_value(value.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            let id = value.get("id").and_then(|id| id.as_u64()).unwrap_or(0) as usize;
+            journal.append(
+                "computer.invalid_request",
+                serde_json::json!({ "error": err.to_string() }),
+                None,
+            );
+            return ComputerUseResponse::Error {
                 id,
                 ok: false,
-                error: format!("{}", error),
-            })?).await?;
+                error: format!("invalid request: {}", err),
+            };
         }
-        Ok(())
+    };
+
+    if let ComputerUseRequest::PublishEvent { id, kind, payload } = request {
+        journal.append(kind, payload, None);
+        return ComputerUseResponse::Empty { id, ok: true };
     }
 
-    async fn handle_request(&self, request: ComputerUseRequest, framed: &mut Framed<TcpStream, LinesCodec>) -> anyhow::Result<()> {
-        match &request {
+    let id = request.id();
+    let (response, journal_screenshot) = match handle_request(&request).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("error handling request: {}", error);
+            (
+                ComputerUseResponse::Error {
+                    id,
+                    ok: false,
+                    error: error.to_string(),
+                },
+                None,
+            )
+        }
+    };
+    let ok = !matches!(response, ComputerUseResponse::Error { .. });
+    // The full request — including typed text — goes into the journal so
+    // observers can see exactly what happened between screenshots. The
+    // journal is in-memory, capped, and served only to the observatory;
+    // streams that leave the machine must redact text themselves.
+    journal.append(
+        "computer.action",
+        serde_json::json!({ "request": value, "ok": ok }),
+        journal_screenshot,
+    );
+    response
+}
+
+    /// Executes the action and returns its response plus, for screen-capturing
+    /// actions, the full-screen PNG for the journal.
+    async fn handle_request(request: &ComputerUseRequest) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
+        match request {
+            ComputerUseRequest::PublishEvent { .. } => {
+                // Handled before execution reaches here; see respond_and_journal.
+                unreachable!("publish_event is not a computer action")
+            }
             ComputerUseRequest::GetDisplayInfo { id } => {
                 let (width, height) = pal::ScreenSampler::new()?.size_px();
-                framed.send(serde_json::to_string(&ComputerUseResponse::DisplayInfo {
+                Ok((ComputerUseResponse::DisplayInfo {
                     id: *id,
                     ok: true,
                     display: ComputerUseDisplayInfo {
                         width_px: width,
                         height_px: height,
                     }
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::CursorPosition { id } => {
                 let (x, y) = pal::cursor_position()?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Text {
+                Ok((ComputerUseResponse::Text {
                     id: *id,
                     ok: true,
                     text: format!("X={},Y={}", x, y)
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::Zoom { id, region } => {
                 let (x0, y0, x1, y1) = *region;
                 let (x0, x1) = (std::cmp::min(x0, x1), std::cmp::max(x0, x1));
                 let (y0, y1) = (std::cmp::min(y0, y1), std::cmp::max(y0, y1));
                 let (width, height) = (x1 - x0, y1 - y0);
-                self.reply_screenshot(framed, *id, Some((x0, y0, width, height))).await
+                reply_screenshot(*id, Some((x0, y0, width, height))).await
             },
             ComputerUseRequest::Wait { id, duration_seconds, } => {
                 tokio::time::sleep(Duration::from_secs_f64(*duration_seconds)).await;
-                self.reply_screenshot(framed, *id, None).await
+                reply_screenshot(*id, None).await
             }
-            ComputerUseRequest::Screenshot { id } => self.reply_screenshot(framed, *id, None).await,
+            ComputerUseRequest::Screenshot { id } => reply_screenshot(*id, None).await,
             ComputerUseRequest::MouseMove { id, coordinate: (x, y) } => {
                 pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::LeftClick(params) |
             ComputerUseRequest::RightClick(params) |
@@ -290,105 +336,186 @@ impl ComputerUse {
                 if let Some(key) = key {
                     input::release_keys(key).await?;
                 }
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::LeftMouseDown { id, coordinate: (x, y) } => {
                 pal::mouse_move_to((*x as i32, *y as i32)).await?;
                 pal::mouse_down(MouseButton::Left).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::LeftMouseUp { id, coordinate: (x, y) } => {
                 pal::mouse_move_to((*x as i32, *y as i32)).await?;
                 pal::mouse_up(MouseButton::Left).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::LeftClickDrag { id, coordinate, start_coordinate } => {
                 pal::mouse_move_to(((*start_coordinate).0 as i32, (*start_coordinate).1 as i32)).await?;
                 pal::mouse_down(MouseButton::Left).await?;
                 pal::mouse_move_to(((*coordinate).0 as i32, (*coordinate).1 as i32)).await?;
                 pal::mouse_up(MouseButton::Left).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::Type { id, text } => {
                 input::type_text(text).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::Key { id, text } => {
                 input::press_release_keys(text).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::HoldKey { id, duration_seconds, text } => {
                 input::hold_keys(text, Duration::from_secs_f64(*duration_seconds)).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Text {
+                Ok((ComputerUseResponse::Text {
                     id: *id,
                     ok: true,
                     text: "The specified delay will complete asynchronously.".into(),
-                })?).await?;
-                Ok(())
+                }, None))
             }
             ComputerUseRequest::Scroll { id, scroll_amount, scroll_direction, coordinate } => {
                 if let Some((x, y)) = coordinate {
                     pal::mouse_move_to((*x as i32, *y as i32)).await?;
                 }
                 pal::mouse_scroll(scroll_amount, scroll_direction).await?;
-                framed.send(serde_json::to_string(&ComputerUseResponse::Empty {
+                Ok((ComputerUseResponse::Empty {
                     id: *id,
                     ok: true,
-                })?).await?;
-                Ok(())
+                }, None))
             }
         }
     }
 
-    // Note: bounds is x0,y0,x1,y1, *not* width and height.
-    async fn reply_screenshot(&self, framed: &mut Framed<TcpStream, LinesCodec>, id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<()> {
-        // We take a full screenshot, even if the request is for a cropped screenshot, so the observatory gets consistently sized screenshots.
-        let screenshot = ScreenSampler::new()?.screenshot()?;
-        let cropped = {
-            let (x, y, mut width, mut height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
-            width = std::cmp::min(width, screenshot.width() as usize - x);
-            height = std::cmp::min(height, screenshot.height() as usize - y);
-            screenshot.view(x as u32, y as u32, width as u32, height as u32).to_image()
-        };
+/// Takes a screenshot and builds the agent's response plus the full-screen
+/// PNG for the journal. `bounds` is x0,y0,x1,y1, *not* width and height; the
+/// agent gets the cropped view but the journal always gets the full screen,
+/// so the observatory shows consistently sized screenshots.
+async fn reply_screenshot(id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
+    let screenshot = ScreenSampler::new()?.screenshot()?;
+    let cropped = {
+        let (x, y, mut width, mut height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        width = std::cmp::min(width, screenshot.width() as usize - x);
+        height = std::cmp::min(height, screenshot.height() as usize - y);
+        screenshot.view(x as u32, y as u32, width as u32, height as u32).to_image()
+    };
 
-        // Make the screenshot available to the observatory.
-        self.to_server.send(ComputerUseToServerMessage::TookScreenshot(screenshot)).await?;
+    let mut full_png_bytes = Vec::new();
+    screenshot.write_to(&mut std::io::Cursor::new(&mut full_png_bytes), ImageFormat::Png)?;
 
-        let mut png_bytes = Vec::new();
-        cropped.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
-        let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-        framed.send(serde_json::to_string(&ComputerUseResponse::Image {
-            id,
-            ok: true,
-            image: ComputerUseImage {
-                data: base64_png_bytes,
-                media_type: "image/png".into(),
-            }
-        })?).await?;
-        Ok(())
+    let mut png_bytes = Vec::new();
+    cropped.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
+    let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    Ok((ComputerUseResponse::Image {
+        id,
+        ok: true,
+        image: ComputerUseImage {
+            data: base64_png_bytes,
+            media_type: "image/png".into(),
+        }
+    }, Some(full_png_bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn start_test_server() -> (std::net::SocketAddr, Arc<Journal>, CancellationToken) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let journal = Journal::new();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve_agent(listener, journal.clone(), shutdown.clone()));
+        (addr, journal, shutdown)
+    }
+
+    async fn publish(
+        stream: &mut BufReader<TcpStream>,
+        id: usize,
+        kind: &str,
+    ) -> serde_json::Value {
+        let request = serde_json::json!({
+            "action": "publish_event",
+            "id": id,
+            "kind": kind,
+            "payload": {},
+        });
+        stream
+            .get_mut()
+            .write_all(format!("{}\n", request).as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_new_agent_replaces_the_old_one() {
+        let (addr, journal, _shutdown) = start_test_server().await;
+
+        let mut first = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let response = publish(&mut first, 1, "test.first").await;
+        assert_eq!(response["ok"], true);
+
+        // The second connection must be served even though the first client
+        // never disconnected (e.g. a killed CLI whose socket lingers).
+        let mut second = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let response = publish(&mut second, 1, "test.second").await;
+        assert_eq!(response["ok"], true);
+
+        // The first client is disconnected: its next read returns EOF.
+        let mut line = String::new();
+        let read = first.read_line(&mut line).await.unwrap();
+        assert_eq!(read, 0);
+
+        let (_, events) = journal.subscribe_with_snapshot();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["test.first", "test.second"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_disconnects_the_agent() {
+        let (addr, _journal, shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let response = publish(&mut client, 1, "test.event").await;
+        assert_eq!(response["ok"], true);
+
+        shutdown.cancel();
+        let mut line = String::new();
+        let read = client.read_line(&mut line).await.unwrap();
+        assert_eq!(read, 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_requests_get_an_error_response() {
+        let (addr, _journal, _shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        client
+            .get_mut()
+            .write_all(b"{\"id\": 7, \"action\": \"no_such_action\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        client.read_line(&mut line).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["ok"], false);
     }
 }

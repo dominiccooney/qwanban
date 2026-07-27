@@ -1,5 +1,6 @@
 <script lang="ts">
 import HostChit from '$lib/components/HostChit.svelte';
+import HostSession from '$lib/components/HostSession.svelte';
 import { LocalStore } from '$lib/localStore.svelte';
 import {Host} from "$lib/Host.svelte.js";
 import {SvelteMap} from "svelte/reactivity";
@@ -40,25 +41,35 @@ $effect(() => {
     console.log(`${hostNames.value.length} host names; ${hosts.size} hosts`);
 });
 
-let hostTextInput: HTMLInputElement;
+let hostTextInput: HTMLInputElement | undefined = $state(undefined);
 let hostText : string = $state('');
+
+// Which host's session view is open. Keyed by name; the Host object is
+// looked up live so a removed host closes its own session view.
+let openHostName: string | undefined = $state(undefined);
+let openHost: Host | undefined = $derived(openHostName !== undefined ? hosts.get(openHostName) : undefined);
 </script>
 <style>
 #screen-grid {
     display: grid;
     grid-template-columns: 33% 33% 33%;
+    gap: 0.5em;
 }
 </style>
 <h1>Observatory</h1>
-<input bind:this={hostTextInput} type="text" bind:value={hostText} use:autofocus>
-<button onclick={() => { addHost(hostText); hostText = ''; hostTextInput.focus(); }}>Add Host</button>
-<p>{hosts.size} host(s)</p>
-<div id="screen-grid">
-{#each hosts.values() as host (host.name)}
-    <HostChit {host}>
-        {#snippet controls()}
-            <button onclick={() => removeHost(host.name)}>&cross;</button>
-        {/snippet}
-    </HostChit>
-{/each}
-</div>
+{#if openHost}
+    <HostSession host={openHost} onClose={() => { openHostName = undefined; }} />
+{:else}
+    <input bind:this={hostTextInput} type="text" bind:value={hostText} use:autofocus>
+    <button onclick={() => { addHost(hostText); hostText = ''; hostTextInput?.focus(); }}>Add Host</button>
+    <p>{hosts.size} host(s)</p>
+    <div id="screen-grid">
+    {#each hosts.values() as host (host.name)}
+        <HostChit {host} onOpen={() => { openHostName = host.name; }}>
+            {#snippet controls()}
+                <button onclick={() => removeHost(host.name)}>&cross;</button>
+            {/snippet}
+        </HostChit>
+    {/each}
+    </div>
+{/if}

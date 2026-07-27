@@ -1,86 +1,200 @@
-use anyhow::Context;
-/// The websocket server which interacts with the observatory.
+//! The WebSocket server the observatory connects to.
+//!
+//! Observers are pure subscribers of the journal: on connect they receive a
+//! snapshot of recent events, then live events as they are appended, all in
+//! journal order. Screenshots are fetched by id (`{"fetchScreenshot": id}`)
+//! and returned as binary frames prefixed with the id line, so the client
+//! can correlate them. Any number of observers may connect; none of them
+//! keeps any other component alive.
 
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, WebSocketStream};
-use futures_util::{StreamExt, SinkExt};
+use std::sync::Arc;
+use futures_util::{SinkExt, StreamExt};
 use image::ImageFormat;
 use serde::Deserialize;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use crate::pal;
+use tokio_util::sync::CancellationToken;
+use crate::journal::Journal;
+use crate::pal::ScreenSampler;
 
-pub(crate) enum ObservatoryToServerMessage {
-    TakeScreenshot(tokio::sync::oneshot::Sender<anyhow::Result<pal::ScreenshotImage>>),
+fn take_screenshot_png() -> anyhow::Result<Vec<u8>> {
+    let screenshot = ScreenSampler::new()?.screenshot()?;
+    let mut png = Vec::new();
+    screenshot.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
+    Ok(png)
 }
 
 #[derive(Deserialize)]
-pub(crate) enum ObservatoryToObservedMessage {
+#[serde(rename_all = "camelCase")]
+enum ObservatoryRequest {
+    FetchScreenshot(String),
+    /// Take a screenshot now, journaled as an `observer.screenshot` event.
+    /// The requesting observer receives it through its own live stream like
+    /// everyone else, then fetches the image by id.
     TakeScreenshot,
 }
 
-pub(crate) enum ServerToObservatoryMessage {
-    Screenshot(pal::ScreenshotImage),
-}
-
-pub(crate) struct Observed {
-    to_server: tokio::sync::mpsc::Sender<ObservatoryToServerMessage>,
-    from_server: tokio::sync::mpsc::Receiver<ServerToObservatoryMessage>,
-}
-
-impl Observed {
-    pub(crate) fn new(to_server: tokio::sync::mpsc::Sender<ObservatoryToServerMessage>, from_server: tokio::sync::mpsc::Receiver<ServerToObservatoryMessage>) -> Self {
-        Self {
-            to_server,
-            from_server,
-        }
-    }
-
-    pub(crate) async fn serve_ws(&mut self, port: u16) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-        println!("WebSocket server listening on port: {}", port);
-        loop {
-            tokio::select! {
-                Ok((stream, _)) = listener.accept() => {
-                    let to_server_clone = self.to_server.clone();
-                    tokio::spawn(async move {
-                        let mut ws_stream = accept_async(stream).await.unwrap();
-                        println!("New WebSocket connection: {:?}", ws_stream);
-                        if let Err(err) = service_websocket_connection(&mut ws_stream, to_server_clone).await {
-                            eprintln!("WebSocket connection error: {:?}", err);
-                        }
-                        println!("WebSocket connection closed: {:?}", ws_stream);
-                    });
-                }
-                None = self.from_server.recv() => {
-                    eprintln!("Shutting down websocket server");
-                    break;
+pub(crate) async fn serve_observatory(
+    listener: TcpListener,
+    journal: Arc<Journal>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, peer)) => {
+                        eprintln!("observer connected: {}", peer);
+                        let journal = journal.clone();
+                        let cancel = shutdown.child_token();
+                        tokio::spawn(async move {
+                            if let Err(err) = serve_observer(stream, journal, cancel).await {
+                                eprintln!("observer connection ended: {}", err);
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("error accepting observer socket: {}", err);
+                    }
                 }
             }
+            _ = shutdown.cancelled() => break,
         }
-        Ok(())
     }
 }
 
-async fn service_websocket_connection(ws_stream: &mut WebSocketStream<tokio::net::TcpStream>, to_server: tokio::sync::mpsc::Sender<ObservatoryToServerMessage>) -> anyhow::Result<()> {
-    while let Some(Ok(msg)) = ws_stream.next().await {
-        match serde_json::from_str(msg.to_text()?) {
-            Err(err) => {
-                eprintln!("Websocket error: {}", err);
-            },
-            Ok(msg) => {
-                match msg {
-                    ObservatoryToObservedMessage::TakeScreenshot => {
-                        let (reply, recv) = tokio::sync::oneshot::channel();
-                        to_server.send(ObservatoryToServerMessage::TakeScreenshot(reply)).await.context("failed to take screenshot")?;
-                        // TODO: This is cheesy, the shutdown may happen during the screenshot.
-                        let image = recv.await??;
-                        let mut png_bytes = Vec::new();
-                        image.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
-                        ws_stream.send(Message::Binary(png_bytes.into())).await?;
+async fn serve_observer(
+    stream: TcpStream,
+    journal: Arc<Journal>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut ws = accept_async(stream).await?;
+    // Subscribe before sending the snapshot so no event can fall in a gap;
+    // events which race into both are deduplicated by seq below.
+    let (mut live, snapshot) = journal.subscribe_with_snapshot();
+    let mut last_sent_seq = 0u64;
+    for event in snapshot {
+        ws.send(Message::Text(serde_json::to_string(&*event)?.into())).await?;
+        last_sent_seq = event.seq;
+    }
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            event = live.recv() => {
+                match event {
+                    Ok(event) => {
+                        if event.seq <= last_sent_seq {
+                            continue;
+                        }
+                        last_sent_seq = event.seq;
+                        ws.send(Message::Text(serde_json::to_string(&*event)?.into())).await?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        // A slow observer missed events. It can see them in
+                        // the seq gap; keep streaming from here.
+                        eprintln!("observer lagged; {} events dropped", missed);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = ws.next() => {
+                let Some(Ok(msg)) = incoming else { break };
+                let Ok(text) = msg.to_text() else { continue };
+                match serde_json::from_str::<ObservatoryRequest>(text) {
+                    Ok(ObservatoryRequest::TakeScreenshot) => {
+                        match take_screenshot_png() {
+                            Ok(png) => {
+                                journal.append("observer.screenshot", serde_json::json!({}), Some(png));
+                            }
+                            Err(err) => {
+                                eprintln!("observer screenshot failed: {}", err);
+                            }
+                        }
+                    }
+                    Ok(ObservatoryRequest::FetchScreenshot(id)) => {
+                        match journal.screenshot(&id) {
+                            Some(png) => {
+                                // Prefix the binary frame with the id so the
+                                // client can correlate the reply.
+                                let mut framed = id.clone().into_bytes();
+                                framed.push(b'\n');
+                                framed.extend_from_slice(&png);
+                                ws.send(Message::Binary(framed.into())).await?;
+                            }
+                            None => {
+                                ws.send(Message::Text(
+                                    serde_json::json!({ "missingScreenshot": id }).to_string().into(),
+                                )).await?;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("unparseable observer request: {}", err);
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::connect_async;
+
+    async fn start_test_server(journal: Arc<Journal>) -> (std::net::SocketAddr, CancellationToken) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve_observatory(listener, journal, shutdown.clone()));
+        (addr, shutdown)
+    }
+
+    #[tokio::test]
+    async fn snapshot_then_live_events_in_order() {
+        let journal = Journal::new();
+        journal.append("test.before", serde_json::json!({"n": 1}), None);
+        let (addr, _shutdown) = start_test_server(journal.clone()).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
+        let snapshot_msg = ws.next().await.unwrap().unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_str(snapshot_msg.to_text().unwrap()).unwrap();
+        assert_eq!(snapshot["kind"], "test.before");
+
+        journal.append("test.after", serde_json::json!({"n": 2}), None);
+        let live_msg = ws.next().await.unwrap().unwrap();
+        let live: serde_json::Value =
+            serde_json::from_str(live_msg.to_text().unwrap()).unwrap();
+        assert_eq!(live["kind"], "test.after");
+        assert!(live["seq"].as_u64().unwrap() > snapshot["seq"].as_u64().unwrap());
+    }
+
+    #[tokio::test]
+    async fn fetches_screenshots_by_id() {
+        let journal = Journal::new();
+        let event = journal.append("test.shot", serde_json::json!({}), Some(vec![9, 8, 7]));
+        let id = event.screenshot_id.clone().unwrap();
+        let (addr, _shutdown) = start_test_server(journal.clone()).await;
+
+        let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
+        // Skip the snapshot event.
+        ws.next().await.unwrap().unwrap();
+
+        ws.send(Message::Text(
+            serde_json::json!({ "fetchScreenshot": id }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let reply = ws.next().await.unwrap().unwrap();
+        let Message::Binary(bytes) = reply else {
+            panic!("expected a binary frame");
+        };
+        let newline = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        assert_eq!(&bytes[..newline], id.as_bytes());
+        assert_eq!(&bytes[newline + 1..], &[9, 8, 7]);
+    }
 }
