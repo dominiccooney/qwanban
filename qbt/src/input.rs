@@ -97,6 +97,10 @@ fn key_parser<'src>() -> impl Parser<'src, &'src str, Vec<Key>, extra::Err<Rich<
 }
 
 pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return pal::type_text(text).await;
+
+    #[cfg(not(target_os = "linux"))]
     for ch in text.chars().into_iter() {
         let key = Key::Typed(ch);
         pal::send_key_down(key)?;
@@ -104,6 +108,8 @@ pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
         pal::send_key_up(key)?;
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
+
+    #[cfg(not(target_os = "linux"))]
     Ok(())
 }
 

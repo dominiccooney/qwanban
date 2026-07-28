@@ -8,7 +8,7 @@ use xkeysym::{key, Keysym};
 
 use crate::input::Key;
 use crate::computer_use::ScrollDirection;
-use crate::pal::x11_connection::{connection, keycode_for_keysym, X11Connection};
+use crate::pal::x11_connection::{connection, keycode_for_keysym, keystrokes_for_text, KeyStroke, X11Connection};
 
 // See libX11 X11/keysymdef.h. Named keys map onto their X11 keysym; typed and chord-literal
 // characters both resolve through Keysym::from_char, since XTEST has no direct analog of
@@ -43,6 +43,41 @@ fn send_fake_input(x11: &X11Connection, type_: u8, detail: u8, root_x: i16, root
         .check()
         .context("sending a synthetic input event")?;
     x11.conn.flush()?;
+    Ok(())
+}
+
+fn send_keystroke(x11: &X11Connection, stroke: KeyStroke) -> anyhow::Result<()> {
+    let shift_keycode = stroke
+        .shift
+        .then(|| keycode_for_keysym(x11, Keysym::from(key::Shift_L)))
+        .transpose()?;
+    if let Some(shift_keycode) = shift_keycode {
+        send_fake_input(x11, KEY_PRESS_EVENT, shift_keycode, 0, 0)?;
+    }
+    if let Err(error) = send_fake_input(x11, KEY_PRESS_EVENT, stroke.keycode, 0, 0) {
+        if let Some(shift_keycode) = shift_keycode {
+            let _ = send_fake_input(x11, KEY_RELEASE_EVENT, shift_keycode, 0, 0);
+        }
+        return Err(error);
+    }
+
+    let key_release = send_fake_input(x11, KEY_RELEASE_EVENT, stroke.keycode, 0, 0);
+    let shift_release = shift_keycode
+        .map(|keycode| send_fake_input(x11, KEY_RELEASE_EVENT, keycode, 0, 0))
+        .transpose();
+    key_release?;
+    shift_release?;
+    Ok(())
+}
+
+pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
+    let x11 = connection()?;
+    for stroke in keystrokes_for_text(x11, text)? {
+        // Keep each character's complete modifier, press, and release sequence in one
+        // synchronous section so cancellation and remote-X latency cannot leave a key held.
+        send_keystroke(x11, stroke)?;
+        tokio::time::sleep(Duration::from_millis(12)).await;
+    }
     Ok(())
 }
 
