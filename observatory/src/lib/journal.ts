@@ -108,7 +108,7 @@ export function formatAgo(atMs: number, nowMs: number): string {
 		[86400, 'day'],
 		[3600, 'hour'],
 		[60, 'minute'],
-		[1, 'second'],
+		[1, 'second']
 	];
 	for (const [size, name] of units) {
 		if (seconds >= size || size === 1) {
@@ -150,10 +150,54 @@ export function latestAgentStatuses(events: JournalEvent[]): AgentStatuses {
 	return statuses;
 }
 
+/**
+ * A run of consecutive timeline events that say the same thing (e.g. dozens of
+ * back-to-back `screenshot` actions). Runs of one are ordinary rows.
+ */
+export interface TimelineRun {
+	/** Stable key for keyed each blocks: the seq of the first event. */
+	key: number;
+	events: JournalEvent[];
+	/** The newest event of the run: its screenshot is the run's screen. */
+	representative: JournalEvent;
+}
+
+/**
+ * Identity used to collapse repeats. Events with a long-form body (assistant,
+ * user, reasoning) always stay separate: their text is the point, so folding
+ * them would hide content rather than noise.
+ */
+function repeatKeyOf(event: JournalEvent): string | undefined {
+	if (bodyOf(event)) {
+		return undefined;
+	}
+	return `${event.kind}|${roleOf(event)}|${summarize(event)}`;
+}
+
+/** Folds consecutive identical events into runs, preserving journal order. */
+export function groupRepeats(events: JournalEvent[]): TimelineRun[] {
+	const runs: TimelineRun[] = [];
+	for (const event of events) {
+		const previous = runs.at(-1);
+		const key = repeatKeyOf(event);
+		if (
+			previous !== undefined &&
+			key !== undefined &&
+			repeatKeyOf(previous.representative) === key
+		) {
+			previous.events.push(event);
+			// The newest event represents the run, so following the timeline
+			// live keeps showing the latest screen.
+			previous.representative = event;
+			continue;
+		}
+		runs.push({ key: event.seq, events: [event], representative: event });
+	}
+	return runs;
+}
+
 /** The click/drag coordinate of a computer action, for image annotation. */
-export function clickCoordinateOf(
-	event: JournalEvent
-): { x: number; y: number } | undefined {
+export function clickCoordinateOf(event: JournalEvent): { x: number; y: number } | undefined {
 	if (event.kind !== 'computer.action') {
 		return undefined;
 	}
