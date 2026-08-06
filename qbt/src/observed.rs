@@ -16,10 +16,9 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use crate::journal::Journal;
-use crate::pal::ScreenSampler;
 
 fn take_screenshot_png() -> anyhow::Result<Vec<u8>> {
-    let screenshot = ScreenSampler::new()?.screenshot()?;
+    let screenshot = crate::pal::screenshot()?;
     let mut png = Vec::new();
     screenshot.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
     Ok(png)

@@ -12,7 +12,7 @@ use futures::{SinkExt, StreamExt};
 use image::{GenericImageView, ImageFormat};
 use crate::journal::Journal;
 use crate::{input, pal};
-use crate::pal::{MouseButton, ScreenSampler};
+use crate::pal::MouseButton;
 
 #[derive(Deserialize)]
 pub(crate) struct MouseClickParams {
@@ -407,7 +407,7 @@ async fn respond_and_journal(value: serde_json::Value, journal: &Journal) -> Com
 /// agent gets the cropped view but the journal always gets the full screen,
 /// so the observatory shows consistently sized screenshots.
 async fn reply_screenshot(id: usize, bounds: Option<(usize, usize, usize, usize)>) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
-    let screenshot = ScreenSampler::new()?.screenshot()?;
+    let screenshot = pal::screenshot()?;
     let cropped = {
         let (x, y, mut width, mut height) = bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
         width = std::cmp::min(width, screenshot.width() as usize - x);
