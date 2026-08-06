@@ -26,8 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     match &args.command {
         Some(CliCommand::Screenshot) => {
-            let sampler = pal::ScreenSampler::new()?;
-            sampler.screenshot()?.save("screenshot.png")?;
+            pal::screenshot()?.save("screenshot.png")?;
             Ok(())
         }
         Some(CliCommand::Input) => input::send_input_demo().await,
