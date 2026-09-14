@@ -13,7 +13,7 @@ use image::{GenericImageView, ImageFormat};
 use crate::journal::Journal;
 use crate::{input, pal};
 use crate::pal::MouseButton;
-use crate::pal::ScreenshotImage;
+use crate::pal::{CapturedScreenshot, ForegroundWindow, ScreenshotImage};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +147,8 @@ pub(crate) enum ComputerUseResponse {
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
         image: ComputerUseImage,
+        #[serde(rename = "foregroundWindow")]
+        foreground_window: Option<ForegroundWindow>,
         /// Only a full-screen image can become the next click-guard reference.
         #[serde(skip)]
         reference_screenshot: Option<ScreenshotImage>,
@@ -330,17 +332,24 @@ async fn execute_action(
             )
         }
     };
-    let ok = response.completed();
     // The full request — including typed text — goes into the journal so
     // observers can see exactly what happened between screenshots. The
     // journal is in-memory, capped, and served only to the observatory;
     // streams that leave the machine must redact text themselves.
     journal.append(
         "computer.action",
-        serde_json::json!({ "request": value, "ok": ok }),
+        action_payload(value, &response),
         journal_screenshot,
     );
     response
+}
+
+fn action_payload(request: serde_json::Value, response: &ComputerUseResponse) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "request": request, "ok": response.completed() });
+    if let ComputerUseResponse::Image { foreground_window, .. } = response {
+        payload["foregroundWindow"] = serde_json::json!(foreground_window);
+    }
+    payload
 }
 
 const MAX_SEQUENCE_ACTIONS: usize = 20;
@@ -451,10 +460,7 @@ async fn run_sequence(
     };
     journal.append(
         "computer.action",
-        serde_json::json!({
-            "request": { "action": "run_sequence", "steps": executed },
-            "ok": true,
-        }),
+        action_payload(serde_json::json!({ "action": "run_sequence", "steps": executed }), &response),
         journal_screenshot,
     );
     if let ComputerUseResponse::Image { text, .. } = &mut response {
@@ -617,7 +623,7 @@ async fn click_guard(
 ) -> anyhow::Result<Option<(ComputerUseResponse, Option<Vec<u8>>)>> {
     let current = pal::screenshot()?;
     let changed = match &state.last_screenshot {
-        Some(last) => region_changed(last, &current, region),
+        Some(last) => region_changed(last, &current.image, region),
         None => true,
     };
     if !changed {
@@ -691,9 +697,10 @@ async fn reply_screenshot(
 /// full-screen PNG for the journal. Encoding alone does not update view state.
 fn image_response(
     id: usize,
-    screenshot: &ScreenshotImage,
+    capture: &CapturedScreenshot,
     bounds: Option<(usize, usize, usize, usize)>,
 ) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
+    let screenshot = &capture.image;
     let cropped = {
         let (x, y, mut width, mut height) =
             bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
@@ -717,6 +724,7 @@ fn image_response(
         ok: true,
         aborted: false,
         text: None,
+        foreground_window: capture.foreground_window.clone(),
         image: ComputerUseImage {
             data: base64_png_bytes,
             media_type: "image/png".into(),
@@ -824,7 +832,77 @@ mod tests {
             .unwrap();
         let mut line = String::new();
         stream.read_line(&mut line).await.unwrap();
-        serde_json::from_str(&line).unwrap()
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if response.get("image").is_some() {
+            assert_foreground_contract(&response);
+        }
+        response
+    }
+
+    fn assert_foreground_contract(response: &serde_json::Value) {
+        let foreground = response.get("foregroundWindow").expect("every screenshot includes foregroundWindow");
+        if !foreground.is_null() {
+            let fields = foreground.as_object().expect("foregroundWindow must be null or an object");
+            assert_eq!(fields.len(), 2);
+            for name in ["executable", "title"] {
+                let value = fields.get(name).expect("both fields must be present");
+                assert!(value.is_null() || value.is_string());
+            }
+        }
+    }
+
+    #[test]
+    fn image_and_journal_preserve_known_partial_and_unknown_foreground() {
+        for foreground in [
+            serde_json::json!({ "executable": "C:\\app.exe", "title": "文書\n<untrusted>" }),
+            serde_json::json!({ "executable": null, "title": "" }),
+            serde_json::json!({ "executable": "C:\\app.exe", "title": null }),
+            serde_json::json!({ "executable": null, "title": null }),
+            serde_json::Value::Null,
+        ] {
+            let capture = CapturedScreenshot {
+                image: ScreenshotImage::new(2, 2),
+                foreground_window: foreground.as_object().map(|fields| ForegroundWindow {
+                    executable: fields["executable"].as_str().map(str::to_owned),
+                    title: fields["title"].as_str().map(str::to_owned),
+                }),
+            };
+            for bounds in [None, Some((0, 0, 1, 1))] {
+                let (response, _) = image_response(1, &capture, bounds).unwrap();
+                let wire = serde_json::to_value(&response).unwrap();
+                assert_foreground_contract(&wire);
+                assert_eq!(wire["foregroundWindow"], foreground);
+                assert_eq!(action_payload(serde_json::json!({}), &response)["foregroundWindow"], foreground);
+                assert!(wire.get("foreground_window").is_none());
+            }
+        }
+        let empty = ComputerUseResponse::Empty { id: 1, ok: true };
+        assert!(action_payload(serde_json::json!({}), &empty).get("foregroundWindow").is_none());
+    }
+
+    #[tokio::test]
+    async fn normal_wait_and_post_action_screenshots_share_metadata_with_the_journal() {
+        let (addr, journal, shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        // Empty text takes the real post-action settle/capture path without
+        // sending input or changing the user's GUI state.
+        for (index, mut request) in [
+            serde_json::json!({ "action": "screenshot" }),
+            serde_json::json!({ "action": "wait", "durationSeconds": 0 }),
+            serde_json::json!({ "action": "type", "text": "" }),
+        ].into_iter().enumerate() {
+            request["id"] = serde_json::json!(index + 1);
+            let response = send(&mut client, request).await;
+            assert_eq!(response["ok"], true);
+            assert_eq!(response["image"]["mediaType"], "image/png");
+            let (_, events) = journal.subscribe_with_snapshot();
+            let event = events.last().unwrap();
+            assert_eq!(event.payload.get("foregroundWindow"), response.get("foregroundWindow"));
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(response["image"]["data"].as_str().unwrap()).unwrap();
+            assert_eq!(*journal.screenshot(event.screenshot_id.as_deref().unwrap()).unwrap(), png);
+        }
+        shutdown.cancel();
     }
 
     #[test]
@@ -855,9 +933,13 @@ mod tests {
 
     #[test]
     fn only_returned_full_images_establish_a_guard_reference() {
-        let full = ScreenshotImage::from_pixel(4, 4, image::Rgba([80, 90, 100, 255]));
+        let capture = CapturedScreenshot {
+            image: ScreenshotImage::from_pixel(4, 4, image::Rgba([80, 90, 100, 255])),
+            foreground_window: None,
+        };
+        let full = capture.image.clone();
         let mut state = ClientState { last_screenshot: None };
-        let (response, _) = image_response(1, &full, None).unwrap();
+        let (response, _) = image_response(1, &capture, None).unwrap();
         assert!(state.last_screenshot.is_none());
         let wire = serde_json::to_value(&response).unwrap();
         assert_eq!(wire["aborted"], false);
@@ -866,7 +948,7 @@ mod tests {
         state.record_response(response);
         assert_eq!(state.last_screenshot.as_ref(), Some(&full));
 
-        let (crop_response, journal_png) = image_response(2, &full, Some((1, 1, 2, 2))).unwrap();
+        let (crop_response, journal_png) = image_response(2, &capture, Some((1, 1, 2, 2))).unwrap();
         let wire = serde_json::to_value(&crop_response).unwrap();
         let png = base64::engine::general_purpose::STANDARD
             .decode(wire["image"]["data"].as_str().unwrap()).unwrap();
@@ -877,9 +959,9 @@ mod tests {
         state.record_response(crop_response);
         assert!(state.last_screenshot.is_none());
 
-        state.record_response(image_response(3, &full, None).unwrap().0);
+        state.record_response(image_response(3, &capture, None).unwrap().0);
         for bounds in [(4, 0, 1, 1), (0, 4, 1, 1), (0, 0, 0, 1), (usize::MAX, 0, 1, 1)] {
-            assert!(image_response(4, &full, Some(bounds)).is_err());
+            assert!(image_response(4, &capture, Some(bounds)).is_err());
         }
         state.record_response(ComputerUseResponse::Error { id: 4, ok: false, error: "failed".into() });
         assert_eq!(state.last_screenshot.as_ref(), Some(&full));
@@ -903,6 +985,7 @@ mod tests {
         let (_, events) = journal.subscribe_with_snapshot();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["ok"], false);
+        assert_eq!(events[0].payload.get("foregroundWindow"), response.get("foregroundWindow"));
         let journal_png = journal.screenshot(events[0].screenshot_id.as_deref().unwrap()).unwrap();
         let response_png = base64::engine::general_purpose::STANDARD
             .decode(response["image"]["data"].as_str().unwrap()).unwrap();
@@ -927,6 +1010,7 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[2].payload["request"]["action"], "run_sequence");
         assert_eq!(events[2].payload["ok"], true);
+        assert_eq!(events[2].payload.get("foregroundWindow"), sequence.get("foregroundWindow"));
 
         let guard = serde_json::json!({
             "id": 52, "action": "left_click", "key": "invalid_guard_safety_key",
@@ -949,7 +1033,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_preserves_the_seen_reference_and_stops_on_guard_abort() {
-        let mut changed_reference = pal::screenshot().unwrap();
+        let mut changed_reference = pal::screenshot().unwrap().image;
         for y in 0..2 {
             for x in 0..2 {
                 let pixel = changed_reference.get_pixel_mut(x, y);
@@ -974,6 +1058,7 @@ mod tests {
             assert!(!response.completed());
             let wire = serde_json::to_value(&response).unwrap();
             assert_eq!(wire["id"], 81);
+            assert_foreground_contract(&wire);
             assert_eq!(wire["ok"], true);
             assert_eq!(wire["aborted"], true);
             assert!(wire["text"].as_str().unwrap().contains("Sequence aborted at step 2"));
@@ -984,6 +1069,7 @@ mod tests {
             assert_eq!(events[0].payload["ok"], true);
             assert_eq!(events[1].payload["request"]["action"], "left_click");
             assert_eq!(events[1].payload["ok"], false);
+            assert_eq!(events[1].payload.get("foregroundWindow"), wire.get("foregroundWindow"));
             let png = base64::engine::general_purpose::STANDARD
                 .decode(wire["image"]["data"].as_str().unwrap()).unwrap();
             assert_eq!(

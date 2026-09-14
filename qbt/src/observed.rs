@@ -17,11 +17,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use crate::journal::Journal;
 
-fn take_screenshot_png() -> anyhow::Result<Vec<u8>> {
+fn take_screenshot_png() -> anyhow::Result<(Vec<u8>, Option<crate::pal::ForegroundWindow>)> {
     let screenshot = crate::pal::screenshot()?;
     let mut png = Vec::new();
-    screenshot.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
-    Ok(png)
+    screenshot.image.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
+    Ok((png, screenshot.foreground_window))
 }
 
 #[derive(Deserialize)]
@@ -104,8 +104,9 @@ async fn serve_observer(
                 match serde_json::from_str::<ObservatoryRequest>(text) {
                     Ok(ObservatoryRequest::TakeScreenshot) => {
                         match take_screenshot_png() {
-                            Ok(png) => {
-                                journal.append("observer.screenshot", serde_json::json!({}), Some(png));
+                            Ok((png, foreground_window)) => {
+                                journal.append("observer.screenshot",
+                                    serde_json::json!({ "foregroundWindow": foreground_window }), Some(png));
                             }
                             Err(err) => {
                                 eprintln!("observer screenshot failed: {}", err);
@@ -195,5 +196,20 @@ mod tests {
         let newline = bytes.iter().position(|byte| *byte == b'\n').unwrap();
         assert_eq!(&bytes[..newline], id.as_bytes());
         assert_eq!(&bytes[newline + 1..], &[9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn observer_capture_journals_foreground_metadata_with_the_image() {
+        let journal = Journal::new();
+        let (addr, shutdown) = start_test_server(journal.clone()).await;
+        let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
+        ws.send(Message::Text("\"takeScreenshot\"".into())).await.unwrap();
+        let message = ws.next().await.unwrap().unwrap();
+        let event: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(event["kind"], "observer.screenshot");
+        assert!(event["payload"].get("foregroundWindow").is_some());
+        let png = journal.screenshot(event["screenshotId"].as_str().unwrap()).unwrap();
+        assert!(image::load_from_memory(&png).is_ok());
+        shutdown.cancel();
     }
 }

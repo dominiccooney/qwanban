@@ -29,20 +29,23 @@ mod os_input_impl;
 pub(crate) use os_input_impl::*;
 pub(crate) use os_screen_impl::*;
 
+mod foreground;
+pub(crate) use foreground::{CapturedScreenshot, ForegroundWindow};
+
 /// Captures one screenshot. Windows desktop GDI resources can become invalid
 /// when the interactive desktop is replaced (for example after reconnecting a
 /// remote session). A failed capture drops the complete sampler before one
 /// bounded retry reacquires the desktop window, device contexts, and bitmap as
 /// one consistent resource set.
-pub(crate) fn screenshot() -> anyhow::Result<ScreenshotImage> {
+pub(crate) fn screenshot() -> anyhow::Result<CapturedScreenshot> {
     #[cfg(target_os = "windows")]
     {
-        return retry_read_once(|| ScreenSampler::new()?.screenshot());
+        return retry_read_once(|| foreground::capture(|| ScreenSampler::new()?.screenshot()));
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        ScreenSampler::new()?.screenshot()
+        foreground::capture(|| ScreenSampler::new()?.screenshot())
     }
 }
 
