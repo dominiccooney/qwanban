@@ -19,13 +19,13 @@ fn active_window(x11: &X11Connection, active: Atom) -> Option<u32> {
 }
 
 fn parse_active_window(reply: &GetPropertyReply) -> Option<u32> {
-    if reply.type_ != u32::from(AtomEnum::WINDOW) || reply.bytes_after != 0 || reply.value_len != 1
-    {
+    // EWMH defines one WINDOW, but xfwm4 appends a second value, so only the
+    // requested first value is used and bytes_after is ignored.
+    if reply.type_ != u32::from(AtomEnum::WINDOW) {
         return None;
     }
-    let mut values = reply.value32()?;
-    let window = values.next()?;
-    (window != 0 && values.next().is_none()).then_some(window)
+    let window = reply.value32()?.next()?;
+    (window != 0).then_some(window)
 }
 
 fn title(x11: &X11Connection, window: u32) -> Option<String> {
@@ -68,7 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_window_requires_one_complete_window_id() {
+    fn active_window_uses_first_nonzero_window_id() {
         let reply = GetPropertyReply {
             type_: AtomEnum::WINDOW.into(),
             format: 32,
@@ -77,11 +77,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_active_window(&reply), Some(42));
-        for invalid in [
+        // xfwm4 publishes `0x1c00003, 0x0`: a length-1 read leaves 4 bytes
+        // after, and a longer read returns the trailing zero.
+        for xfwm4 in [
             GetPropertyReply {
                 bytes_after: 4,
                 ..reply.clone()
             },
+            GetPropertyReply {
+                value_len: 2,
+                value: [42u32, 0].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+                ..reply.clone()
+            },
+        ] {
+            assert_eq!(parse_active_window(&xfwm4), Some(42));
+        }
+        for invalid in [
             GetPropertyReply {
                 format: 8,
                 ..reply.clone()
@@ -91,7 +102,8 @@ mod tests {
                 ..reply.clone()
             },
             GetPropertyReply {
-                value_len: 2,
+                value_len: 0,
+                value: Vec::new(),
                 ..reply.clone()
             },
             GetPropertyReply {
