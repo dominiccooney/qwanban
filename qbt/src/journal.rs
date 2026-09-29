@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 const MAX_EVENTS: usize = 1000;
-const MAX_SCREENSHOTS: usize = 100;
 const BROADCAST_CAPACITY: usize = 256;
+
+pub(crate) const DEFAULT_MAX_SCREENSHOTS: usize = 200;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -39,10 +40,11 @@ struct State {
 pub(crate) struct Journal {
     state: Mutex<State>,
     sender: broadcast::Sender<Arc<JournalEvent>>,
+    max_screenshots: usize,
 }
 
 impl Journal {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(max_screenshots: usize) -> Arc<Self> {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
             state: Mutex::new(State {
@@ -51,6 +53,7 @@ impl Journal {
                 next_seq: 1,
             }),
             sender,
+            max_screenshots,
         })
     }
 
@@ -69,7 +72,7 @@ impl Journal {
         let screenshot_id = screenshot_png.map(|png| {
             let id = format!("shot_{}", seq);
             state.screenshots.push_back((id.clone(), Arc::new(png)));
-            while state.screenshots.len() > MAX_SCREENSHOTS {
+            while state.screenshots.len() > self.max_screenshots {
                 state.screenshots.pop_front();
             }
             id
@@ -108,6 +111,33 @@ impl Journal {
             .find(|(stored_id, _)| stored_id == id)
             .map(|(_, png)| png.clone())
     }
+
+    /// Snapshots an inclusive screenshot range in journal order. Both boundary
+    /// ids must still be retained, so a caller never receives a partial range
+    /// after an eviction.
+    pub(crate) fn screenshot_range(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> anyhow::Result<Vec<(String, Arc<Vec<u8>>)>> {
+        let state = self.state.lock().unwrap();
+        let start = state
+            .screenshots
+            .iter()
+            .position(|(id, _)| id == from)
+            .ok_or_else(|| anyhow::anyhow!("screenshot evicted: {from}"))?;
+        let end = state
+            .screenshots
+            .iter()
+            .position(|(id, _)| id == to)
+            .ok_or_else(|| anyhow::anyhow!("screenshot evicted: {to}"))?;
+        anyhow::ensure!(start <= end, "screenshot range is not in journal order");
+        Ok(state
+            .screenshots
+            .range(start..=end)
+            .map(|(id, png)| (id.clone(), png.clone()))
+            .collect())
+    }
 }
 
 fn now_ms() -> u64 {
@@ -123,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_then_stream_is_gapless() {
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         journal.append("action", serde_json::json!({"n": 1}), None);
         let (mut receiver, snapshot) = journal.subscribe_with_snapshot();
         journal.append("action", serde_json::json!({"n": 2}), None);
@@ -136,10 +166,37 @@ mod tests {
 
     #[tokio::test]
     async fn stores_and_serves_screenshots() {
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         let event = journal.append("action", serde_json::json!({}), Some(vec![1, 2, 3]));
         let id = event.screenshot_id.clone().unwrap();
         assert_eq!(*journal.screenshot(&id).unwrap(), vec![1, 2, 3]);
         assert!(journal.screenshot("shot_999").is_none());
+    }
+
+    #[test]
+    fn screenshot_retention_evicts_oldest_and_ranges_follow_journal_order() {
+        let journal = Journal::new(2);
+        let first = journal.append("action", serde_json::json!({}), Some(vec![1]));
+        journal.append("no-image", serde_json::json!({}), None);
+        let second = journal.append("action", serde_json::json!({}), Some(vec![2]));
+        let third = journal.append("action", serde_json::json!({}), Some(vec![3]));
+
+        assert!(journal.screenshot(first.screenshot_id.as_deref().unwrap()).is_none());
+        let range = journal
+            .screenshot_range(
+                second.screenshot_id.as_deref().unwrap(),
+                third.screenshot_id.as_deref().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(range.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["shot_3", "shot_4"]);
+        assert_eq!(range.iter().map(|(_, png)| png[0]).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(
+            journal.screenshot_range("shot_1", "shot_4").unwrap_err().to_string(),
+            "screenshot evicted: shot_1",
+        );
+        assert_eq!(
+            journal.screenshot_range("shot_4", "shot_3").unwrap_err().to_string(),
+            "screenshot range is not in journal order",
+        );
     }
 }

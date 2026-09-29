@@ -6,6 +6,16 @@ Run the server (agent port, then observatory WebSocket port):
 cargo run -- serve 1234 5678
 ```
 
+`serve` retains the newest 200 screenshots as encoded PNGs. Configure the
+capacity and the root for saved artifacts at startup:
+
+```powershell
+cargo run -- serve 1234 5678 --max-screenshots 200 --artifact-root runs
+```
+
+The startup log estimates the buffer's memory from a fresh PNG sample. Both
+settings take effect when the server starts.
+
 qbt keeps an in-memory journal of everything observable on the host: it
 records every computer action it executes (with a full-screen screenshot for
 screen-capturing actions), and the agent publishes transcript and status
@@ -14,6 +24,39 @@ clients connect to the WebSocket port and receive the journal — a snapshot,
 then live events, in one order — and fetch screenshots by id. One agent
 connection is served at a time; a newly connecting agent replaces the
 previous one, so a restarted CLI can always reconnect.
+
+Every successful action response containing `image` also contains the
+`screenshot_id` assigned to the same PNG in the journal. Existing clients can
+ignore this additive field. The agent can retain a selected frame with:
+
+```jsonc
+{ "id": 7, "action": "save_screenshot", "screenshot_id": "shot_123", "path": "screenshots/a.png" }
+```
+
+The response contains `saved` with the absolute destination. Relative paths
+resolve under `--artifact-root`; parent (`..`) segments, symlink escapes, and
+absolute paths outside that root are rejected. An ID that is no longer in the
+buffer returns an error with `"error": "screenshot evicted"`.
+
+Text clipboard actions use the native Windows, X11, or macOS clipboard:
+
+```jsonc
+{ "id": 8, "action": "get_clipboard" }
+{ "id": 9, "action": "set_clipboard", "text": "hello" }
+```
+
+`get_clipboard` returns `text` as a string or `null`; `set_clipboard` returns
+the normal empty success response.
+
+Create an animated WebP from an inclusive retained range through the
+observatory WebSocket (default `ws://127.0.0.1:5678`):
+
+```powershell
+cargo run -- flipbook --from shot_10 --to shot_20 --out runs/interaction.webp --fps 2
+```
+
+Frames follow journal order. Encoding runs on demand at lossy quality 75; no
+background encoder remains active.
 
 Run the observatory:
 

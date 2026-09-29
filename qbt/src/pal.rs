@@ -29,6 +29,10 @@ mod os_input_impl;
 pub(crate) use os_input_impl::*;
 pub(crate) use os_screen_impl::*;
 
+mod clipboard;
+pub(crate) use clipboard::{get_text as get_clipboard, set_text as set_clipboard};
+pub(crate) use clipboard::shutdown as shutdown_clipboard;
+
 mod foreground;
 pub(crate) use foreground::{CapturedScreenshot, ForegroundWindow};
 

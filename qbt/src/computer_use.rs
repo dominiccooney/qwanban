@@ -1,6 +1,7 @@
 // See https://github.com/anthropics/claude-quickstarts/blob/main/computer-use-demo/computer_use_demo/tools/computer.py
 // See https://github.com/anthropics/anthropic-sdk-typescript/blob/4f2eb8071993780d79610b9eda26db96f7653843/src/resources/beta/messages/messages.ts#L3283
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use base64::Engine;
@@ -10,6 +11,7 @@ use tokio_util::codec::{Framed, LinesCodec};
 use tokio_util::sync::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use image::{GenericImageView, ImageFormat};
+use crate::artifacts::ArtifactStore;
 use crate::journal::Journal;
 use crate::{input, pal};
 use crate::pal::MouseButton;
@@ -70,6 +72,10 @@ pub(crate) enum ComputerUseRequest {
     // Not Claude events
     GetDisplayInfo { id: usize, },
 
+    SaveScreenshot { id: usize, screenshot_id: String, path: PathBuf },
+    GetClipboard { id: usize },
+    SetClipboard { id: usize, text: String },
+
     /// The agent publishes one of its own events (transcript message,
     /// coordinator status change, ...) into the journal for the observatory.
     /// `kind` namespaces the event (e.g. "transcript.message"); `payload` is
@@ -99,6 +105,9 @@ impl ComputerUseRequest {
             ComputerUseRequest::Zoom { id, .. } => *id,
             ComputerUseRequest::RunSequence { id, .. } => *id,
             ComputerUseRequest::GetDisplayInfo { id, .. } => *id,
+            ComputerUseRequest::SaveScreenshot { id, .. } => *id,
+            ComputerUseRequest::GetClipboard { id } => *id,
+            ComputerUseRequest::SetClipboard { id, .. } => *id,
             ComputerUseRequest::PublishEvent { id, .. } => *id,
         }
     }
@@ -139,6 +148,8 @@ pub(crate) enum ComputerUseResponse {
     Empty { id: usize, ok: bool },
     DisplayInfo { id: usize, ok: bool, display: ComputerUseDisplayInfo },
     Text { id: usize, ok: bool, text: String },
+    Clipboard { id: usize, ok: bool, text: Option<String> },
+    Saved { id: usize, ok: bool, saved: PathBuf },
     Image {
         id: usize,
         ok: bool,
@@ -147,6 +158,8 @@ pub(crate) enum ComputerUseResponse {
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
         image: ComputerUseImage,
+        #[serde(rename = "screenshot_id", skip_serializing_if = "Option::is_none")]
+        screenshot_id: Option<String>,
         #[serde(rename = "foregroundWindow")]
         foreground_window: Option<ForegroundWindow>,
         /// Only a full-screen image can become the next click-guard reference.
@@ -160,7 +173,17 @@ impl ComputerUseResponse {
         match self {
             Self::Error { .. } => false,
             Self::Image { ok, aborted, .. } => *ok && !aborted,
-            Self::Empty { ok, .. } | Self::DisplayInfo { ok, .. } | Self::Text { ok, .. } => *ok,
+            Self::Empty { ok, .. }
+            | Self::DisplayInfo { ok, .. }
+            | Self::Text { ok, .. }
+            | Self::Clipboard { ok, .. }
+            | Self::Saved { ok, .. } => *ok,
+        }
+    }
+
+    fn set_screenshot_id(&mut self, screenshot_id: Option<String>) {
+        if let Self::Image { screenshot_id: response_id, .. } = self {
+            *response_id = screenshot_id;
         }
     }
 }
@@ -180,6 +203,7 @@ pub(crate) struct ComputerUseDisplayInfo {
 pub(crate) async fn serve_agent(
     listener: TcpListener,
     journal: Arc<Journal>,
+    artifacts: Arc<ArtifactStore>,
     shutdown: CancellationToken,
 ) {
     let mut active_client: Option<(CancellationToken, tokio::task::JoinHandle<()>)> = None;
@@ -198,7 +222,12 @@ pub(crate) async fn serve_agent(
                             let _ = handle.await;
                         }
                         let cancel = shutdown.child_token();
-                        let handle = tokio::spawn(handle_agent_client(socket, journal.clone(), cancel.clone()));
+                        let handle = tokio::spawn(handle_agent_client(
+                            socket,
+                            journal.clone(),
+                            artifacts.clone(),
+                            cancel.clone(),
+                        ));
                         active_client = Some((cancel, handle));
                     }
                     Err(err) => {
@@ -215,7 +244,12 @@ pub(crate) async fn serve_agent(
     }
 }
 
-async fn handle_agent_client(socket: TcpStream, journal: Arc<Journal>, cancel: CancellationToken) {
+async fn handle_agent_client(
+    socket: TcpStream,
+    journal: Arc<Journal>,
+    artifacts: Arc<ArtifactStore>,
+    cancel: CancellationToken,
+) {
     let mut framed = Framed::new(socket, LinesCodec::new());
     let mut state = ClientState { last_screenshot: None };
     loop {
@@ -240,7 +274,7 @@ async fn handle_agent_client(socket: TcpStream, journal: Arc<Journal>, cancel: C
                 continue;
             }
         };
-        let response = respond_and_journal(value, &journal, &state).await;
+        let response = respond_and_journal(value, &journal, &artifacts, &state).await;
         let Ok(text) = serde_json::to_string(&response) else {
             eprintln!("failed to serialize response");
             continue;
@@ -278,6 +312,7 @@ impl ClientState {
 async fn respond_and_journal(
     value: serde_json::Value,
     journal: &Journal,
+    artifacts: &ArtifactStore,
     state: &ClientState,
 ) -> ComputerUseResponse {
     let request: ComputerUseRequest = match serde_json::from_value(value.clone()) {
@@ -303,10 +338,10 @@ async fn respond_and_journal(
     }
 
     if let ComputerUseRequest::RunSequence { id, actions } = &request {
-        return run_sequence(*id, actions.clone(), journal, state).await;
+        return run_sequence(*id, actions.clone(), journal, artifacts, state).await;
     }
 
-    execute_action(value, request, journal, state).await
+    execute_action(value, request, journal, artifacts, state).await
 }
 
 /// Runs one already-parsed action, journals it (with any screenshot it
@@ -315,10 +350,11 @@ async fn execute_action(
     value: serde_json::Value,
     request: ComputerUseRequest,
     journal: &Journal,
+    artifacts: &ArtifactStore,
     state: &ClientState,
 ) -> ComputerUseResponse {
     let id = request.id();
-    let (response, journal_screenshot) = match handle_request(&request, state).await {
+    let (mut response, journal_screenshot) = match handle_request(&request, journal, artifacts, state).await {
         Ok(outcome) => outcome,
         Err(error) => {
             eprintln!("error handling request: {}", error);
@@ -336,11 +372,12 @@ async fn execute_action(
     // observers can see exactly what happened between screenshots. The
     // journal is in-memory, capped, and served only to the observatory;
     // streams that leave the machine must redact text themselves.
-    journal.append(
+    let event = journal.append(
         "computer.action",
         action_payload(value, &response),
         journal_screenshot,
     );
+    response.set_screenshot_id(event.screenshot_id.clone());
     response
 }
 
@@ -364,6 +401,7 @@ async fn run_sequence(
     id: usize,
     actions: Vec<serde_json::Value>,
     journal: &Journal,
+    artifacts: &ArtifactStore,
     state: &ClientState,
 ) -> ComputerUseResponse {
     if actions.is_empty() {
@@ -423,7 +461,7 @@ async fn run_sequence(
     }
     let mut executed = 0;
     for (item, step_request) in steps {
-        let mut response = execute_action(item, step_request, journal, state).await;
+        let mut response = execute_action(item, step_request, journal, artifacts, state).await;
         if !response.completed() {
             match &mut response {
                 ComputerUseResponse::Error { id: response_id, error, .. } => {
@@ -458,11 +496,12 @@ async fn run_sequence(
             }
         }
     };
-    journal.append(
+    let event = journal.append(
         "computer.action",
         action_payload(serde_json::json!({ "action": "run_sequence", "steps": executed }), &response),
         journal_screenshot,
     );
+    response.set_screenshot_id(event.screenshot_id.clone());
     if let ComputerUseResponse::Image { text, .. } = &mut response {
         *text = Some(format!("Executed {executed} actions."));
     }
@@ -474,7 +513,12 @@ async fn run_sequence(
     /// (clicks, drag, type, key, scroll) answer with a screenshot of the
     /// resulting state, so the caller never needs a second round trip just to
     /// see what happened.
-    async fn handle_request(request: &ComputerUseRequest, state: &ClientState) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
+    async fn handle_request(
+        request: &ComputerUseRequest,
+        journal: &Journal,
+        artifacts: &ArtifactStore,
+        state: &ClientState,
+    ) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
         match request {
             ComputerUseRequest::PublishEvent { .. } => {
                 // Handled before execution reaches here; see respond_and_journal.
@@ -494,6 +538,23 @@ async fn run_sequence(
                         height_px: height,
                     }
                 }, None))
+            }
+            ComputerUseRequest::SaveScreenshot { id, screenshot_id, path } => {
+                let png = journal
+                    .screenshot(screenshot_id)
+                    .ok_or_else(|| anyhow::anyhow!("screenshot evicted"))?;
+                let saved = artifacts.save(path, &png)?;
+                Ok((ComputerUseResponse::Saved { id: *id, ok: true, saved }, None))
+            }
+            ComputerUseRequest::GetClipboard { id } => Ok((ComputerUseResponse::Clipboard {
+                id: *id,
+                ok: true,
+                text: tokio::task::spawn_blocking(pal::get_clipboard).await??,
+            }, None)),
+            ComputerUseRequest::SetClipboard { id, text } => {
+                let text = text.clone();
+                tokio::task::spawn_blocking(move || pal::set_clipboard(text)).await??;
+                Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
             }
             ComputerUseRequest::CursorPosition { id } => {
                 let (x, y) = pal::cursor_position()?;
@@ -729,6 +790,7 @@ fn image_response(
             data: base64_png_bytes,
             media_type: "image/png".into(),
         },
+        screenshot_id: None,
         reference_screenshot: if bounds.is_none() { Some(screenshot.clone()) } else { None },
     }, Some(full_png_bytes)))
 }
@@ -736,14 +798,37 @@ fn image_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::DEFAULT_MAX_SCREENSHOTS;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    async fn start_test_server() -> (std::net::SocketAddr, Arc<Journal>, CancellationToken) {
+    fn test_artifacts() -> Arc<ArtifactStore> {
+        let root = std::env::temp_dir().join(format!(
+            "qbt-computer-use-tests-{}",
+            std::process::id(),
+        ));
+        Arc::new(ArtifactStore::new(root).unwrap())
+    }
+
+    async fn start_test_server_with_capacity(
+        max_screenshots: usize,
+    ) -> (std::net::SocketAddr, Arc<Journal>, Arc<ArtifactStore>, CancellationToken) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let journal = Journal::new();
+        let journal = Journal::new(max_screenshots);
+        let artifacts = test_artifacts();
         let shutdown = CancellationToken::new();
-        tokio::spawn(serve_agent(listener, journal.clone(), shutdown.clone()));
+        tokio::spawn(serve_agent(
+            listener,
+            journal.clone(),
+            artifacts.clone(),
+            shutdown.clone(),
+        ));
+        (addr, journal, artifacts, shutdown)
+    }
+
+    async fn start_test_server() -> (std::net::SocketAddr, Arc<Journal>, CancellationToken) {
+        let (addr, journal, _artifacts, shutdown) =
+            start_test_server_with_capacity(DEFAULT_MAX_SCREENSHOTS).await;
         (addr, journal, shutdown)
     }
 
@@ -834,9 +919,89 @@ mod tests {
         stream.read_line(&mut line).await.unwrap();
         let response: serde_json::Value = serde_json::from_str(&line).unwrap();
         if response.get("image").is_some() {
+            assert!(response["screenshot_id"].as_str().unwrap().starts_with("shot_"));
             assert_foreground_contract(&response);
         }
         response
+    }
+
+    #[tokio::test]
+    async fn screenshot_id_can_save_the_exact_journal_png() {
+        let (addr, journal, artifacts, shutdown) =
+            start_test_server_with_capacity(DEFAULT_MAX_SCREENSHOTS).await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let screenshot = send(
+            &mut client,
+            serde_json::json!({ "id": 1, "action": "screenshot" }),
+        )
+        .await;
+        let screenshot_id = screenshot["screenshot_id"].as_str().unwrap();
+        let (_, events) = journal.subscribe_with_snapshot();
+        assert_eq!(events[0].screenshot_id.as_deref(), Some(screenshot_id));
+
+        let saved = send(
+            &mut client,
+            serde_json::json!({
+                "id": 2,
+                "action": "save_screenshot",
+                "screenshot_id": screenshot_id,
+                "path": "runs/x/screenshots/a.png",
+            }),
+        )
+        .await;
+        assert_eq!(saved["id"], 2);
+        assert_eq!(saved["ok"], true);
+        let saved_path = PathBuf::from(saved["saved"].as_str().unwrap());
+        assert_eq!(saved_path, artifacts.root().join("runs/x/screenshots/a.png"));
+        assert_eq!(
+            std::fs::read(&saved_path).unwrap(),
+            **journal.screenshot(screenshot_id).unwrap(),
+        );
+        shutdown.cancel();
+        std::fs::remove_dir_all(artifacts.root()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_screenshot_reports_eviction_and_rejects_parent_segments() {
+        let (addr, _journal, artifacts, shutdown) = start_test_server_with_capacity(1).await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let first = send(
+            &mut client,
+            serde_json::json!({ "id": 1, "action": "screenshot" }),
+        )
+        .await;
+        send(
+            &mut client,
+            serde_json::json!({ "id": 2, "action": "screenshot" }),
+        )
+        .await;
+        let evicted = send(
+            &mut client,
+            serde_json::json!({
+                "id": 3,
+                "action": "save_screenshot",
+                "screenshot_id": first["screenshot_id"],
+                "path": "evicted.png",
+            }),
+        )
+        .await;
+        assert_eq!(evicted["ok"], false);
+        assert_eq!(evicted["error"], "screenshot evicted");
+
+        let rejected = send(
+            &mut client,
+            serde_json::json!({
+                "id": 4,
+                "action": "save_screenshot",
+                "screenshot_id": "shot_2",
+                "path": "../outside.png",
+            }),
+        )
+        .await;
+        assert_eq!(rejected["ok"], false);
+        assert!(rejected["error"].as_str().unwrap().contains("must not contain '..'"));
+        shutdown.cancel();
+        std::fs::remove_dir_all(artifacts.root()).unwrap();
     }
 
     fn assert_foreground_contract(response: &serde_json::Value) {
@@ -1046,7 +1211,8 @@ mod tests {
         // An unseen intermediate screenshot must not replace any of them.
         for reference in [None, Some(ScreenshotImage::new(1, 1)), Some(changed_reference)] {
             let mut state = ClientState { last_screenshot: reference.clone() };
-            let journal = Journal::new();
+            let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
+            let artifacts = test_artifacts();
             let response = respond_and_journal(serde_json::json!({
                 "id": 81, "action": "run_sequence", "actions": [
                     { "action": "screenshot" },
@@ -1054,7 +1220,7 @@ mod tests {
                       "coordinate": [1, 1], "expectUnchanged": [0, 0, 2, 2] },
                     { "action": "key", "text": "invalid_later_step_sentinel" },
                 ],
-            }), &journal, &state).await;
+            }), &journal, &artifacts, &state).await;
             assert!(!response.completed());
             let wire = serde_json::to_value(&response).unwrap();
             assert_eq!(wire["id"], 81);
@@ -1083,14 +1249,15 @@ mod tests {
     #[tokio::test]
     async fn sequence_error_does_not_commit_intermediate_screenshots() {
         let state = ClientState { last_screenshot: None };
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
+        let artifacts = test_artifacts();
         let response = respond_and_journal(serde_json::json!({
             "id": 91, "action": "run_sequence", "actions": [
                 { "action": "screenshot" },
                 { "action": "key", "text": "invalid_runtime_sentinel" },
                 { "action": "cursor_position" },
             ],
-        }), &journal, &state).await;
+        }), &journal, &artifacts, &state).await;
         let wire = serde_json::to_value(response).unwrap();
         assert_eq!(wire["id"], 91);
         assert_eq!(wire["ok"], false);

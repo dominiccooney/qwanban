@@ -28,6 +28,7 @@ fn take_screenshot_png() -> anyhow::Result<(Vec<u8>, Option<crate::pal::Foregrou
 #[serde(rename_all = "camelCase")]
 enum ObservatoryRequest {
     FetchScreenshot(String),
+    FetchScreenshotRange { from: String, to: String },
     /// Take a screenshot now, journaled as an `observer.screenshot` event.
     /// The requesting observer receives it through its own live stream like
     /// everyone else, then fetches the image by id.
@@ -130,6 +131,27 @@ async fn serve_observer(
                             }
                         }
                     }
+                    Ok(ObservatoryRequest::FetchScreenshotRange { from, to }) => {
+                        match journal.screenshot_range(&from, &to) {
+                            Ok(screenshots) => {
+                                let count = screenshots.len();
+                                for (id, png) in screenshots {
+                                    let mut framed = id.into_bytes();
+                                    framed.push(b'\n');
+                                    framed.extend_from_slice(&png);
+                                    ws.send(Message::Binary(framed.into())).await?;
+                                }
+                                ws.send(Message::Text(
+                                    serde_json::json!({ "screenshotRangeComplete": count }).to_string().into(),
+                                )).await?;
+                            }
+                            Err(error) => {
+                                ws.send(Message::Text(
+                                    serde_json::json!({ "screenshotRangeError": error.to_string() }).to_string().into(),
+                                )).await?;
+                            }
+                        }
+                    }
                     Err(err) => {
                         eprintln!("unparseable observer request: {}", err);
                     }
@@ -143,6 +165,7 @@ async fn serve_observer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::DEFAULT_MAX_SCREENSHOTS;
     use tokio_tungstenite::connect_async;
 
     async fn start_test_server(journal: Arc<Journal>) -> (std::net::SocketAddr, CancellationToken) {
@@ -155,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_then_live_events_in_order() {
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         journal.append("test.before", serde_json::json!({"n": 1}), None);
         let (addr, _shutdown) = start_test_server(journal.clone()).await;
 
@@ -175,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_screenshots_by_id() {
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         let event = journal.append("test.shot", serde_json::json!({}), Some(vec![9, 8, 7]));
         let id = event.screenshot_id.clone().unwrap();
         let (addr, _shutdown) = start_test_server(journal.clone()).await;
@@ -199,8 +222,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetches_an_inclusive_screenshot_range_in_journal_order() {
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
+        let first = journal.append("test.first", serde_json::json!({}), Some(vec![1]));
+        journal.append("test.no-image", serde_json::json!({}), None);
+        let last = journal.append("test.last", serde_json::json!({}), Some(vec![3]));
+        let (addr, _shutdown) = start_test_server(journal).await;
+        let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
+        for _ in 0..3 {
+            ws.next().await.unwrap().unwrap();
+        }
+        ws.send(Message::Text(
+            serde_json::json!({
+                "fetchScreenshotRange": {
+                    "from": first.screenshot_id,
+                    "to": last.screenshot_id,
+                },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let first_frame = ws.next().await.unwrap().unwrap().into_data();
+        let last_frame = ws.next().await.unwrap().unwrap().into_data();
+        assert_eq!(&first_frame[first_frame.len() - 1..], &[1]);
+        assert_eq!(&last_frame[last_frame.len() - 1..], &[3]);
+        let complete: serde_json::Value = serde_json::from_str(
+            ws.next().await.unwrap().unwrap().to_text().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(complete["screenshotRangeComplete"], 2);
+    }
+
+    #[tokio::test]
     async fn observer_capture_journals_foreground_metadata_with_the_image() {
-        let journal = Journal::new();
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         let (addr, shutdown) = start_test_server(journal.clone()).await;
         let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
         ws.send(Message::Text("\"takeScreenshot\"".into())).await.unwrap();

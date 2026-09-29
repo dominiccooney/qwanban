@@ -15,6 +15,9 @@ futures = "0.3.32"
 base64 = "0.22.1"
 tokio-tungstenite = "0.30.0"
 futures-util = "0.3.32"
+arboard = { version = "3.6.1", default-features = false }
+cap-std = "4.0.3"
+webp-animation = { version = "0.10.0", features = ["static"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = {
