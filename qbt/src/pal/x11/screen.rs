@@ -1,10 +1,10 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, GetImageReply, ImageFormat, ImageOrder, Screen};
 use x11rb::rust_connection::RustConnection;
 
-use crate::pal::x11_connection::{connection, X11Connection};
+use crate::pal::x11_connection::{X11Connection, connection};
 
 pub(crate) type ScreenshotImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
 
@@ -22,12 +22,15 @@ impl ScreenSampler {
     pub(crate) fn new() -> anyhow::Result<Self> {
         let x11 = connection()?;
         let screen = &x11.screen;
-        let (red_mask, green_mask, blue_mask) = visual_masks(screen)
-            .context("looking up the root window's visual color masks")?;
+        let (red_mask, green_mask, blue_mask) =
+            visual_masks(screen).context("looking up the root window's visual color masks")?;
         let bits_per_pixel = depth_bits_per_pixel(&x11.conn, screen.root_depth)
             .context("looking up the root window's pixel format")?;
         if bits_per_pixel != 32 {
-            bail!("unsupported root window pixel depth: {} bits per pixel (only 32 is supported)", bits_per_pixel);
+            bail!(
+                "unsupported root window pixel depth: {} bits per pixel (only 32 is supported)",
+                bits_per_pixel
+            );
         }
 
         Ok(Self {
@@ -73,14 +76,27 @@ impl ScreenSampler {
 
         let reply = get_root_image(&self.x11.conn, self.x11.screen.root, width, height)
             .context("capturing the screen")?;
-        decode_zpixmap_to_bgra(&reply.data, self.red_mask, self.green_mask, self.blue_mask, self.msb_first, pixels);
-        self.draw_cursor(pixels, width, height).context("compositing the cursor")?;
+        decode_zpixmap_to_bgra(
+            &reply.data,
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+            self.msb_first,
+            pixels,
+        );
+        self.draw_cursor(pixels, width, height)
+            .context("compositing the cursor")?;
 
         Ok(())
     }
 
     fn draw_cursor(&self, pixels: &mut [u8], width: usize, height: usize) -> anyhow::Result<()> {
-        let cursor = self.x11.conn.xfixes_get_cursor_image()?.reply().context("getting the cursor image")?;
+        let cursor = self
+            .x11
+            .conn
+            .xfixes_get_cursor_image()?
+            .reply()
+            .context("getting the cursor image")?;
         let (cursor_width, cursor_height) = (cursor.width as usize, cursor.height as usize);
         let origin_x = cursor.x as i32 - cursor.xhot as i32;
         let origin_y = cursor.y as i32 - cursor.yhot as i32;
@@ -89,7 +105,11 @@ impl ScreenSampler {
             for col in 0..cursor_width {
                 let screen_x = origin_x + col as i32;
                 let screen_y = origin_y + row as i32;
-                if screen_x < 0 || screen_y < 0 || screen_x as usize >= width || screen_y as usize >= height {
+                if screen_x < 0
+                    || screen_y < 0
+                    || screen_x as usize >= width
+                    || screen_y as usize >= height
+                {
                     continue;
                 }
 
@@ -119,28 +139,65 @@ impl ScreenSampler {
 }
 
 fn visual_masks(screen: &Screen) -> anyhow::Result<(u32, u32, u32)> {
-    screen.allowed_depths.iter()
+    screen
+        .allowed_depths
+        .iter()
         .find(|depth| depth.depth == screen.root_depth)
-        .and_then(|depth| depth.visuals.iter().find(|visual| visual.visual_id == screen.root_visual))
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.visual_id == screen.root_visual)
+        })
         .map(|visual| (visual.red_mask, visual.green_mask, visual.blue_mask))
-        .ok_or_else(|| anyhow!("could not find the root visual {} at depth {}", screen.root_visual, screen.root_depth))
+        .ok_or_else(|| {
+            anyhow!(
+                "could not find the root visual {} at depth {}",
+                screen.root_visual,
+                screen.root_depth
+            )
+        })
 }
 
 fn depth_bits_per_pixel(conn: &RustConnection, depth: u8) -> anyhow::Result<u8> {
-    conn.setup().pixmap_formats.iter()
+    conn.setup()
+        .pixmap_formats
+        .iter()
         .find(|format| format.depth == depth)
         .map(|format| format.bits_per_pixel)
         .ok_or_else(|| anyhow!("no pixmap format advertised for depth {}", depth))
 }
 
-fn get_root_image(conn: &RustConnection, root: u32, width: usize, height: usize) -> anyhow::Result<GetImageReply> {
-    Ok(conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width as u16, height as u16, !0u32)?.reply()?)
+fn get_root_image(
+    conn: &RustConnection,
+    root: u32,
+    width: usize,
+    height: usize,
+) -> anyhow::Result<GetImageReply> {
+    Ok(conn
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            root,
+            0,
+            0,
+            width as u16,
+            height as u16,
+            !0u32,
+        )?
+        .reply()?)
 }
 
 // Decodes ZPixmap data for a 32-bits-per-pixel TrueColor visual into BGRA bytes, matching the
 // sample() contract shared with the Windows PAL (see qbt/src/pal/windows/screen.rs). 32-bit
 // pixels never need scanline padding, so each pixel maps directly to one output pixel.
-fn decode_zpixmap_to_bgra(data: &[u8], red_mask: u32, green_mask: u32, blue_mask: u32, msb_first: bool, out: &mut [u8]) {
+fn decode_zpixmap_to_bgra(
+    data: &[u8],
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
+    msb_first: bool,
+    out: &mut [u8],
+) {
     let red_shift = red_mask.trailing_zeros();
     let green_shift = green_mask.trailing_zeros();
     let blue_shift = blue_mask.trailing_zeros();

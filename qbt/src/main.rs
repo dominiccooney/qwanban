@@ -54,8 +54,16 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(CliCommand::Input) => input::send_input_demo().await,
-        Some(CliCommand::Serve { port, ws_port, artifact_root, max_screenshots }) => {
-            anyhow::ensure!(*max_screenshots > 0, "--max-screenshots must be greater than zero");
+        Some(CliCommand::Serve {
+            port,
+            ws_port,
+            artifact_root,
+            max_screenshots,
+        }) => {
+            anyhow::ensure!(
+                *max_screenshots > 0,
+                "--max-screenshots must be greater than zero"
+            );
             // One journal is the sole source of truth: the agent server
             // writes computer actions and published events into it; the
             // observatory server only reads. Shutdown is one cancellation
@@ -93,7 +101,10 @@ async fn main() -> anyhow::Result<()> {
                 .spawn(move || print_screenshot_memory_estimate(estimate_capacity))?;
 
             eprintln!("ctrl-c to quit.");
-            tokio::signal::ctrl_c().await?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result?,
+                _ = shutdown.cancelled() => {}
+            }
             eprintln!("Server shutting down");
             shutdown.cancel();
             let agent_result = agent_server.await;
@@ -109,9 +120,13 @@ async fn main() -> anyhow::Result<()> {
             clipboard_result?;
             Ok(())
         }
-        Some(CliCommand::Flipbook { from, to, out, fps, observatory }) => {
-            flipbook::create(observatory, from, to, out, *fps).await
-        }
+        Some(CliCommand::Flipbook {
+            from,
+            to,
+            out,
+            fps,
+            observatory,
+        }) => flipbook::create(observatory, from, to, out, *fps).await,
         None => {
             let mut cmd = Cli::command();
             cmd.print_help()?;

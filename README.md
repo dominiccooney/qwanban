@@ -1,5 +1,12 @@
 ## Running qwanban
 
+Install qbt from this repository (the crates.io package named `qbt` is an
+unrelated qBittorrent client):
+
+```powershell
+cargo install --git https://github.com/dominiccooney/qwanban.git qbt
+```
+
 Run the server (agent port, then observatory WebSocket port):
 
 ```powershell
@@ -16,7 +23,7 @@ cargo run -- serve 1234 5678 --max-screenshots 200 --artifact-root runs
 The startup log estimates the buffer's memory from a fresh PNG sample. Both
 settings take effect when the server starts.
 
-qbt keeps an in-memory journal of everything observable on the host: it
+qbt keeps the newest 500 events in an in-memory journal: it
 records every computer action it executes (with a full-screen screenshot for
 screen-capturing actions), and the agent publishes transcript and status
 events into the same journal via the `publish_event` action. Observatory
@@ -87,16 +94,28 @@ the computer-use beta header.)
 
 ### Let Cline recover a stopped backend
 
-Optionally set `CLINE_COMPUTER_USE_BACKEND_COMMAND` in the terminal that launches Cline. It adds the driver's `computer_user_restart_backend` tool, which probes qbt and launches the command only if qbt is unreachable:
+Optionally set `CLINE_COMPUTER_USE_BACKEND_COMMAND` in the terminal that launches Cline. Cline probes qbt and launches the command when needed before its first display query; helper mode also adds the driver's `computer_user_restart_backend` recovery tool:
 
 ```powershell
 $Env:CLINE_COMPUTER_USE_PORT = '1234'
-$Env:CLINE_COMPUTER_USE_BACKEND_COMMAND = 'C:\Users\User\clients\cline\qwanban\target\debug\qbt.exe serve 1234 5678'
+$Env:CLINE_COMPUTER_USE_BACKEND_COMMAND = 'qbt serve 1234 5678'
 ```
 
-Replace the absolute path with your built qbt executable. The agent port must match `CLINE_COMPUTER_USE_PORT`; `5678` is the observatory port. The command runs on the Cline host using `cmd.exe` on Windows or `/bin/sh` on Unix, with Cline's working directory and environment. Quote executable paths containing spaces; do not put PowerShell-only syntax in the command unless it explicitly launches PowerShell.
+The agent port must match `CLINE_COMPUTER_USE_PORT`; `5678` is the observatory port. The command runs on the Cline host using `cmd.exe` on Windows or `/bin/sh` on Unix, from Cline's workspace directory and with its environment. Installing qbt on PATH makes executable lookup independent of that directory. Quote checkout-local executable paths containing spaces; do not put PowerShell-only syntax in the command unless it explicitly launches PowerShell.
 
-Start qbt yourself before starting Cline: this tool provides recovery, not automatic startup. Restart Cline after changing these variables. Keep the launch command in the foreground so Cline can clean up its own child; it leaves independently started backends running. If startup fails, run the command in a terminal to inspect its output, which Cline otherwise discards.
+Restart Cline after changing these variables. Keep the launch command in the foreground so Cline can clean up its own child; it leaves independently started backends running. If startup fails, run the command in a terminal to inspect its output, which Cline otherwise discards.
+
+## Brief pause action
+
+The agent protocol accepts `{"action":"brief_pause"}`. It waits for a fixed
+300 ms and returns a screenshot. Agents can put it in `run_sequence` after an
+action that opens a dialog, launcher, menu, or other transient UI and before
+typing into that UI.
+
+The internal `{"action":"shutdown_backend"}` recovery request acknowledges
+the caller, then closes the agent and observatory listeners and exits qbt
+cleanly. Cline uses it for explicit forced restart when qbt is still running
+but screen capture has degraded.
 
 ## Screenshot foreground-window metadata
 

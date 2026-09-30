@@ -7,20 +7,22 @@
 //! can correlate them. Any number of observers may connect; none of them
 //! keeps any other component alive.
 
-use std::sync::Arc;
+use crate::journal::Journal;
 use futures_util::{SinkExt, StreamExt};
 use image::ImageFormat;
 use serde::Deserialize;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use crate::journal::Journal;
 
 fn take_screenshot_png() -> anyhow::Result<(Vec<u8>, Option<crate::pal::ForegroundWindow>)> {
     let screenshot = crate::pal::screenshot()?;
     let mut png = Vec::new();
-    screenshot.image.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
+    screenshot
+        .image
+        .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
     Ok((png, screenshot.foreground_window))
 }
 
@@ -28,7 +30,10 @@ fn take_screenshot_png() -> anyhow::Result<(Vec<u8>, Option<crate::pal::Foregrou
 #[serde(rename_all = "camelCase")]
 enum ObservatoryRequest {
     FetchScreenshot(String),
-    FetchScreenshotRange { from: String, to: String },
+    FetchScreenshotRange {
+        from: String,
+        to: String,
+    },
     /// Take a screenshot now, journaled as an `observer.screenshot` event.
     /// The requesting observer receives it through its own live stream like
     /// everyone else, then fetches the image by id.
@@ -75,7 +80,8 @@ async fn serve_observer(
     let (mut live, snapshot) = journal.subscribe_with_snapshot();
     let mut last_sent_seq = 0u64;
     for event in snapshot {
-        ws.send(Message::Text(serde_json::to_string(&*event)?.into())).await?;
+        ws.send(Message::Text(serde_json::to_string(&*event)?.into()))
+            .await?;
         last_sent_seq = event.seq;
     }
     loop {
@@ -190,8 +196,7 @@ mod tests {
 
         journal.append("test.after", serde_json::json!({"n": 2}), None);
         let live_msg = ws.next().await.unwrap().unwrap();
-        let live: serde_json::Value =
-            serde_json::from_str(live_msg.to_text().unwrap()).unwrap();
+        let live: serde_json::Value = serde_json::from_str(live_msg.to_text().unwrap()).unwrap();
         assert_eq!(live["kind"], "test.after");
         assert!(live["seq"].as_u64().unwrap() > snapshot["seq"].as_u64().unwrap());
     }
@@ -208,7 +213,9 @@ mod tests {
         ws.next().await.unwrap().unwrap();
 
         ws.send(Message::Text(
-            serde_json::json!({ "fetchScreenshot": id }).to_string().into(),
+            serde_json::json!({ "fetchScreenshot": id })
+                .to_string()
+                .into(),
         ))
         .await
         .unwrap();
@@ -249,10 +256,8 @@ mod tests {
         let last_frame = ws.next().await.unwrap().unwrap().into_data();
         assert_eq!(&first_frame[first_frame.len() - 1..], &[1]);
         assert_eq!(&last_frame[last_frame.len() - 1..], &[3]);
-        let complete: serde_json::Value = serde_json::from_str(
-            ws.next().await.unwrap().unwrap().to_text().unwrap(),
-        )
-        .unwrap();
+        let complete: serde_json::Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(complete["screenshotRangeComplete"], 2);
     }
 
@@ -261,12 +266,16 @@ mod tests {
         let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         let (addr, shutdown) = start_test_server(journal.clone()).await;
         let (mut ws, _) = connect_async(format!("ws://{}", addr)).await.unwrap();
-        ws.send(Message::Text("\"takeScreenshot\"".into())).await.unwrap();
+        ws.send(Message::Text("\"takeScreenshot\"".into()))
+            .await
+            .unwrap();
         let message = ws.next().await.unwrap().unwrap();
         let event: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
         assert_eq!(event["kind"], "observer.screenshot");
         assert!(event["payload"].get("foregroundWindow").is_some());
-        let png = journal.screenshot(event["screenshotId"].as_str().unwrap()).unwrap();
+        let png = journal
+            .screenshot(event["screenshotId"].as_str().unwrap())
+            .unwrap();
         assert!(image::load_from_memory(&png).is_ok());
         shutdown.cancel();
     }

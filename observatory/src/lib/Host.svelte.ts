@@ -1,9 +1,9 @@
-import { SvelteMap } from 'svelte/reactivity';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 export enum HostState {
 	Disconnected,
 	Connecting,
-	Connected,
+	Connected
 }
 
 /**
@@ -22,7 +22,8 @@ export interface JournalEvent {
 }
 
 const MAX_CACHED_SCREENSHOTS = 20;
-const MAX_CLIENT_EVENTS = 2000;
+const MAX_CLIENT_EVENTS = 500;
+const RECONNECT_DELAY_MS = 1000;
 
 /**
  * A connection to one qbt host. Events arrive as text frames in journal
@@ -31,11 +32,14 @@ const MAX_CLIENT_EVENTS = 2000;
  */
 export class Host {
 	private _state: HostState = $state(HostState.Connecting);
+	private _generation = $state(0);
 	private _socket: WebSocket | undefined;
+	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	private closed = false;
 	public events: JournalEvent[] = $state([]);
 	/** screenshotId -> object URL, insertion-ordered for eviction. */
 	public screenshots = new SvelteMap<string, string>();
-	private pendingFetches = new Set<string>();
+	private pendingFetches = new SvelteSet<string>();
 
 	constructor(public readonly name: string) {
 		void this.connect();
@@ -43,6 +47,11 @@ export class Host {
 
 	public get state(): HostState {
 		return this._state;
+	}
+
+	/** Identifies the current qbt server lifetime. */
+	public get generation(): number {
+		return this._generation;
 	}
 
 	/** The most recent event that captured a screenshot, if any. */
@@ -59,20 +68,36 @@ export class Host {
 		return this.events.at(-1);
 	}
 
-	private async connect(): Promise<void> {
+	private connect(): void {
+		if (this.closed) {
+			return;
+		}
+		this._state = HostState.Connecting;
 		const socket = new WebSocket(`ws://${this.name}`);
 		socket.binaryType = 'arraybuffer';
 		this._socket = socket;
 		socket.onopen = () => {
+			if (this._socket !== socket) {
+				return;
+			}
+			// A successful connection is the boundary between server lifetimes.
+			// Qbt restarts sequence numbers and screenshot ids, so its new
+			// snapshot replaces all data from the previous connection.
+			this.clearJournal();
+			this._generation += 1;
 			this._state = HostState.Connected;
 		};
 		socket.onclose = () => {
-			this._state = HostState.Disconnected;
+			this.handleDisconnect(socket);
 		};
 		socket.onerror = () => {
-			this._state = HostState.Disconnected;
+			this.handleDisconnect(socket);
+			socket.close();
 		};
 		socket.onmessage = (event: MessageEvent) => {
+			if (this._socket !== socket) {
+				return;
+			}
 			if (event.data instanceof ArrayBuffer) {
 				this.receiveScreenshot(event.data);
 				return;
@@ -91,6 +116,19 @@ export class Host {
 		};
 	}
 
+	private handleDisconnect(socket: WebSocket): void {
+		if (this._socket !== socket || this.closed) {
+			return;
+		}
+		this._socket = undefined;
+		this._state = HostState.Disconnected;
+		this.pendingFetches.clear();
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			this.connect();
+		}, RECONNECT_DELAY_MS);
+	}
+
 	/** Requests the host to capture a fresh screenshot into its journal. */
 	public takeScreenshot(): void {
 		this.send('takeScreenshot');
@@ -101,8 +139,9 @@ export class Host {
 		if (this.screenshots.has(id) || this.pendingFetches.has(id)) {
 			return;
 		}
-		this.pendingFetches.add(id);
-		this.send({ fetchScreenshot: id });
+		if (this.send({ fetchScreenshot: id })) {
+			this.pendingFetches.add(id);
+		}
 	}
 
 	private receiveScreenshot(data: ArrayBuffer): void {
@@ -113,9 +152,7 @@ export class Host {
 		}
 		const id = new TextDecoder().decode(bytes.subarray(0, newline));
 		this.pendingFetches.delete(id);
-		const url = URL.createObjectURL(
-			new Blob([bytes.subarray(newline + 1)], { type: 'image/png' })
-		);
+		const url = URL.createObjectURL(new Blob([bytes.subarray(newline + 1)], { type: 'image/png' }));
 		this.screenshots.set(id, url);
 		while (this.screenshots.size > MAX_CACHED_SCREENSHOTS) {
 			const oldest = this.screenshots.keys().next().value!;
@@ -124,17 +161,33 @@ export class Host {
 		}
 	}
 
-	private send(data: object | string): void {
-		this._socket?.send(JSON.stringify(data));
+	private send(data: object | string): boolean {
+		if (this._socket?.readyState !== WebSocket.OPEN) {
+			return false;
+		}
+		this._socket.send(JSON.stringify(data));
+		return true;
 	}
 
-	public close(): void {
-		this._socket?.close();
-		this._state = HostState.Disconnected;
+	private clearJournal(): void {
 		for (const url of this.screenshots.values()) {
 			URL.revokeObjectURL(url);
 		}
 		this.screenshots.clear();
+		this.pendingFetches.clear();
 		this.events = [];
+	}
+
+	public close(): void {
+		this.closed = true;
+		if (this.reconnectTimer !== undefined) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = undefined;
+		}
+		const socket = this._socket;
+		this._socket = undefined;
+		socket?.close();
+		this._state = HostState.Disconnected;
+		this.clearJournal();
 	}
 }

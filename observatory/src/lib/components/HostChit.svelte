@@ -67,7 +67,9 @@
 	// chit does not unmount the image (and flash empty) between fetches.
 	let displayScreenshotUrl: string | undefined = $state(undefined);
 	$effect(() => {
-		if (latestScreenshotUrl) {
+		if (!host.latestScreenshotEvent) {
+			displayScreenshotUrl = undefined;
+		} else if (latestScreenshotUrl) {
 			displayScreenshotUrl = latestScreenshotUrl;
 		}
 	});

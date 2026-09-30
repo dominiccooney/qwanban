@@ -1,21 +1,22 @@
 // See https://github.com/anthropics/claude-quickstarts/blob/main/computer-use-demo/computer_use_demo/tools/computer.py
 // See https://github.com/anthropics/anthropic-sdk-typescript/blob/4f2eb8071993780d79610b9eda26db96f7653843/src/resources/beta/messages/messages.ts#L3283
 
+use crate::artifacts::ArtifactStore;
+use crate::journal::Journal;
+use crate::pal::MouseButton;
+use crate::pal::{CapturedScreenshot, ForegroundWindow, ScreenshotImage};
+use crate::{input, pal};
+use base64::Engine;
+use futures::stream::FuturesUnordered;
+use futures::{SinkExt, StreamExt};
+use image::{GenericImageView, ImageFormat};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use base64::Engine;
-use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LinesCodec};
 use tokio_util::sync::CancellationToken;
-use futures::{SinkExt, StreamExt};
-use image::{GenericImageView, ImageFormat};
-use crate::artifacts::ArtifactStore;
-use crate::journal::Journal;
-use crate::{input, pal};
-use crate::pal::MouseButton;
-use crate::pal::{CapturedScreenshot, ForegroundWindow, ScreenshotImage};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,54 +34,119 @@ pub(crate) struct MouseClickParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub(crate) enum ComputerUseRequest {
-    Key { id: usize, text: String, },
-    Type { id: usize, text: String,},
-    MouseMove { id: usize, coordinate: (usize, usize) },
+    Key {
+        id: usize,
+        text: String,
+    },
+    Type {
+        id: usize,
+        text: String,
+    },
+    MouseMove {
+        id: usize,
+        coordinate: (usize, usize),
+    },
     LeftClick(MouseClickParams),
-    #[serde(rename_all="camelCase")]
-    LeftClickDrag { id: usize, start_coordinate: (usize, usize), coordinate: (usize, usize) },
+    #[serde(rename_all = "camelCase")]
+    LeftClickDrag {
+        id: usize,
+        start_coordinate: (usize, usize),
+        coordinate: (usize, usize),
+    },
     RightClick(MouseClickParams),
     MiddleClick(MouseClickParams),
     DoubleClick(MouseClickParams),
-    Screenshot { id: usize, },
+    Screenshot {
+        id: usize,
+    },
     // *Gets* the cursor position
-    CursorPosition { id: usize, },
-    LeftMouseDown { id: usize, coordinate: (usize, usize), },
-    LeftMouseUp { id: usize, coordinate: (usize, usize), },
+    CursorPosition {
+        id: usize,
+    },
+    LeftMouseDown {
+        id: usize,
+        coordinate: (usize, usize),
+    },
+    LeftMouseUp {
+        id: usize,
+        coordinate: (usize, usize),
+    },
 
-    #[serde(rename_all="camelCase")]
-    Scroll { id: usize, scroll_direction: ScrollDirection, scroll_amount: f64, coordinate: Option<(usize, usize)> },
+    #[serde(rename_all = "camelCase")]
+    Scroll {
+        id: usize,
+        scroll_direction: ScrollDirection,
+        scroll_amount: f64,
+        coordinate: Option<(usize, usize)>,
+    },
 
-    #[serde(rename_all="camelCase")]
-    HoldKey { id: usize, duration_seconds: f64, text: String, },
+    #[serde(rename_all = "camelCase")]
+    HoldKey {
+        id: usize,
+        duration_seconds: f64,
+        text: String,
+    },
+
+    // Fixed 300 ms pause for transient UI to become ready, then screenshot.
+    BriefPause {
+        id: usize,
+    },
 
     // Waits -> screenshot
-    #[serde(rename_all="camelCase")]
-    Wait { id: usize, duration_seconds: f64, },
+    #[serde(rename_all = "camelCase")]
+    Wait {
+        id: usize,
+        duration_seconds: f64,
+    },
     TripleClick(MouseClickParams),
 
     // Cropped screenshot, x0,y0,x1,y1
-    Zoom { id: usize, region: (usize, usize, usize, usize) },
+    Zoom {
+        id: usize,
+        region: (usize, usize, usize, usize),
+    },
 
     /// Executes a queue of actions back-to-back and returns one screenshot of
     /// the final state, so a multi-step interaction costs the caller one
     /// round trip instead of one per action. Aborts on the first failing
     /// step; each step is journaled individually.
-    #[serde(rename_all="camelCase")]
-    RunSequence { id: usize, actions: Vec<serde_json::Value> },
+    #[serde(rename_all = "camelCase")]
+    RunSequence {
+        id: usize,
+        actions: Vec<serde_json::Value>,
+    },
 
     // Not Claude events
-    GetDisplayInfo { id: usize, },
+    GetDisplayInfo {
+        id: usize,
+    },
 
-    SaveScreenshot { id: usize, screenshot_id: String, path: PathBuf },
-    GetClipboard { id: usize },
-    SetClipboard { id: usize, text: String },
+    SaveScreenshot {
+        id: usize,
+        screenshot_id: String,
+        path: PathBuf,
+    },
+    GetClipboard {
+        id: usize,
+    },
+    SetClipboard {
+        id: usize,
+        text: String,
+    },
 
     /// The agent publishes one of its own events (transcript message,
     /// coordinator status change, ...) into the journal for the observatory.
     /// `kind` namespaces the event (e.g. "transcript.message"); `payload` is
     /// passed through to observers untouched.
-    PublishEvent { id: usize, kind: String, payload: serde_json::Value },
+    PublishEvent {
+        id: usize,
+        kind: String,
+        payload: serde_json::Value,
+    },
+    /// A trusted loopback client asks this qbt process to exit cleanly.
+    ShutdownBackend {
+        id: usize,
+    },
 }
 
 impl ComputerUseRequest {
@@ -89,11 +155,11 @@ impl ComputerUseRequest {
             ComputerUseRequest::Key { id, .. } => *id,
             ComputerUseRequest::Type { id, .. } => *id,
             ComputerUseRequest::MouseMove { id, .. } => *id,
-            ComputerUseRequest::LeftClick(params) |
-            ComputerUseRequest::RightClick(params) |
-            ComputerUseRequest::MiddleClick(params) |
-            ComputerUseRequest::DoubleClick(params) |
-            ComputerUseRequest::TripleClick(params) => params.id,
+            ComputerUseRequest::LeftClick(params)
+            | ComputerUseRequest::RightClick(params)
+            | ComputerUseRequest::MiddleClick(params)
+            | ComputerUseRequest::DoubleClick(params)
+            | ComputerUseRequest::TripleClick(params) => params.id,
             ComputerUseRequest::LeftClickDrag { id, .. } => *id,
             ComputerUseRequest::Screenshot { id, .. } => *id,
             ComputerUseRequest::CursorPosition { id, .. } => *id,
@@ -101,6 +167,7 @@ impl ComputerUseRequest {
             ComputerUseRequest::LeftMouseUp { id, .. } => *id,
             ComputerUseRequest::Scroll { id, .. } => *id,
             ComputerUseRequest::HoldKey { id, .. } => *id,
+            ComputerUseRequest::BriefPause { id, .. } => *id,
             ComputerUseRequest::Wait { id, .. } => *id,
             ComputerUseRequest::Zoom { id, .. } => *id,
             ComputerUseRequest::RunSequence { id, .. } => *id,
@@ -109,6 +176,7 @@ impl ComputerUseRequest {
             ComputerUseRequest::GetClipboard { id } => *id,
             ComputerUseRequest::SetClipboard { id, .. } => *id,
             ComputerUseRequest::PublishEvent { id, .. } => *id,
+            ComputerUseRequest::ShutdownBackend { id } => *id,
         }
     }
 
@@ -119,7 +187,7 @@ impl ComputerUseRequest {
             ComputerUseRequest::MiddleClick(_) => Some((MouseButton::Middle, 1)),
             ComputerUseRequest::DoubleClick(_) => Some((MouseButton::Left, 2)),
             ComputerUseRequest::TripleClick(_) => Some((MouseButton::Left, 3)),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -144,12 +212,35 @@ pub(crate) struct ComputerUseImage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
 pub(crate) enum ComputerUseResponse {
-    Error { id: usize, ok: bool, error: String },
-    Empty { id: usize, ok: bool },
-    DisplayInfo { id: usize, ok: bool, display: ComputerUseDisplayInfo },
-    Text { id: usize, ok: bool, text: String },
-    Clipboard { id: usize, ok: bool, text: Option<String> },
-    Saved { id: usize, ok: bool, saved: PathBuf },
+    Error {
+        id: usize,
+        ok: bool,
+        error: String,
+    },
+    Empty {
+        id: usize,
+        ok: bool,
+    },
+    DisplayInfo {
+        id: usize,
+        ok: bool,
+        display: ComputerUseDisplayInfo,
+    },
+    Text {
+        id: usize,
+        ok: bool,
+        text: String,
+    },
+    Clipboard {
+        id: usize,
+        ok: bool,
+        text: Option<String>,
+    },
+    Saved {
+        id: usize,
+        ok: bool,
+        saved: PathBuf,
+    },
     Image {
         id: usize,
         ok: bool,
@@ -182,7 +273,11 @@ impl ComputerUseResponse {
     }
 
     fn set_screenshot_id(&mut self, screenshot_id: Option<String>) {
-        if let Self::Image { screenshot_id: response_id, .. } = self {
+        if let Self::Image {
+            screenshot_id: response_id,
+            ..
+        } = self
+        {
             *response_id = screenshot_id;
         }
     }
@@ -195,11 +290,11 @@ pub(crate) struct ComputerUseDisplayInfo {
     height_px: usize,
 }
 
-/// Serves the agent's JSONL socket. One agent at a time, most-recent-wins:
-/// accepting a new connection cancels the previous client's task and awaits
-/// it before the new client is served, so a restarted CLI can always
-/// reconnect and two agents can never interleave input events. Runs until
-/// `shutdown` cancels.
+/// Serves the agent's JSONL socket. The first frame on each connection is
+/// classified before it joins the single-agent action path. A valid shutdown
+/// frame is acknowledged out of band, so it cannot wait behind a long action
+/// and execute after its caller has timed out. Any other first frame makes the
+/// connection the new input owner and promptly cancels the previous owner.
 pub(crate) async fn serve_agent(
     listener: TcpListener,
     journal: Arc<Journal>,
@@ -207,33 +302,54 @@ pub(crate) async fn serve_agent(
     shutdown: CancellationToken,
 ) {
     let mut active_client: Option<(CancellationToken, tokio::task::JoinHandle<()>)> = None;
+    let mut incoming = FuturesUnordered::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((socket, peer)) => {
                         eprintln!("agent connected: {}", peer);
-                        if let Some((cancel, handle)) = active_client.take() {
-                            cancel.cancel();
-                            // Cancellation is observed between requests, so an
-                            // in-flight action (even a long `wait`) completes
-                            // before the new agent is served. Slow, but it is
-                            // what keeps two agents from interleaving input.
-                            let _ = handle.await;
-                        }
-                        let cancel = shutdown.child_token();
-                        let handle = tokio::spawn(handle_agent_client(
-                            socket,
-                            journal.clone(),
-                            artifacts.clone(),
-                            cancel.clone(),
-                        ));
-                        active_client = Some((cancel, handle));
+                        incoming.push(receive_first_request(socket));
                     }
                     Err(err) => {
                         eprintln!("error accepting agent socket: {}", err);
                     }
                 }
+            }
+            candidate = incoming.next(), if !incoming.is_empty() => {
+                let Some(candidate) = candidate else { continue };
+                let (mut framed, first_line) = match candidate {
+                    Ok(Some(candidate)) => candidate,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("agent connection error: {error}");
+                        continue;
+                    }
+                };
+                if let Some(id) = shutdown_request_id(&first_line) {
+                    let response = ComputerUseResponse::Empty { id, ok: true };
+                    match serde_json::to_string(&response) {
+                        Ok(text) => match framed.send(text).await {
+                            Ok(()) => shutdown.cancel(),
+                            Err(error) => eprintln!("failed to acknowledge shutdown: {error}"),
+                        },
+                        Err(error) => eprintln!("failed to serialize shutdown response: {error}"),
+                    }
+                    continue;
+                }
+                if let Some((cancel, handle)) = active_client.take() {
+                    cancel.cancel();
+                    let _ = handle.await;
+                }
+                let cancel = shutdown.child_token();
+                let handle = tokio::spawn(handle_agent_client(
+                    framed,
+                    Some(first_line),
+                    journal.clone(),
+                    artifacts.clone(),
+                    cancel.clone(),
+                ));
+                active_client = Some((cancel, handle));
             }
             _ = shutdown.cancelled() => break,
         }
@@ -244,25 +360,53 @@ pub(crate) async fn serve_agent(
     }
 }
 
-async fn handle_agent_client(
+async fn receive_first_request(
     socket: TcpStream,
+) -> anyhow::Result<Option<(Framed<TcpStream, LinesCodec>, String)>> {
+    let mut framed = Framed::new(socket, LinesCodec::new());
+    while let Some(line) = framed.next().await {
+        let line = line?;
+        if !line.trim().is_empty() {
+            return Ok(Some((framed, line)));
+        }
+    }
+    Ok(None)
+}
+
+fn shutdown_request_id(line: &str) -> Option<usize> {
+    let value = serde_json::from_str(line).ok()?;
+    match serde_json::from_value::<ComputerUseRequest>(value).ok()? {
+        ComputerUseRequest::ShutdownBackend { id } => Some(id),
+        _ => None,
+    }
+}
+
+async fn handle_agent_client(
+    mut framed: Framed<TcpStream, LinesCodec>,
+    mut first_line: Option<String>,
     journal: Arc<Journal>,
     artifacts: Arc<ArtifactStore>,
     cancel: CancellationToken,
 ) {
-    let mut framed = Framed::new(socket, LinesCodec::new());
-    let mut state = ClientState { last_screenshot: None };
+    let input = Arc::new(input::SyntheticInput::default());
+    let mut state = ClientState {
+        last_screenshot: None,
+        input: input.clone(),
+    };
     loop {
-        let line = tokio::select! {
-            _ = cancel.cancelled() => break,
-            next = framed.next() => match next {
-                None => break,
-                Some(Err(err)) => {
-                    eprintln!("agent connection error: {}", err);
-                    break;
+        let line = match first_line.take() {
+            Some(line) => line,
+            None => tokio::select! {
+                _ = cancel.cancelled() => break,
+                next = framed.next() => match next {
+                    None => break,
+                    Some(Err(err)) => {
+                        eprintln!("agent connection error: {}", err);
+                        break;
+                    }
+                    Some(Ok(line)) => line,
                 }
-                Some(Ok(line)) => line,
-            }
+            },
         };
         if line.trim().is_empty() {
             continue;
@@ -274,7 +418,10 @@ async fn handle_agent_client(
                 continue;
             }
         };
-        let response = respond_and_journal(value, &journal, &artifacts, &state).await;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => break,
+            response = respond_and_journal(value, &journal, &artifacts, &state) => response,
+        };
         let Ok(text) = serde_json::to_string(&response) else {
             eprintln!("failed to serialize response");
             continue;
@@ -287,17 +434,25 @@ async fn handle_agent_client(
         // the next request runs. Unsent sequence screenshots never replace it.
         state.record_response(response);
     }
+    if let Err(error) = input.release_all().await {
+        eprintln!("failed to release synthetic input: {error}");
+    }
 }
 
 /// Per-connection view state. A crop invalidates the full-screen reference;
 /// pixels outside the returned crop must not be treated as seen by the agent.
 struct ClientState {
     last_screenshot: Option<ScreenshotImage>,
+    input: Arc<input::SyntheticInput>,
 }
 
 impl ClientState {
     fn record_response(&mut self, response: ComputerUseResponse) {
-        if let ComputerUseResponse::Image { reference_screenshot, .. } = response {
+        if let ComputerUseResponse::Image {
+            reference_screenshot,
+            ..
+        } = response
+        {
             self.last_screenshot = reference_screenshot;
         }
     }
@@ -337,6 +492,10 @@ async fn respond_and_journal(
         return ComputerUseResponse::Empty { id, ok: true };
     }
 
+    if let ComputerUseRequest::ShutdownBackend { id } = request {
+        return ComputerUseResponse::Empty { id, ok: true };
+    }
+
     if let ComputerUseRequest::RunSequence { id, actions } = &request {
         return run_sequence(*id, actions.clone(), journal, artifacts, state).await;
     }
@@ -354,20 +513,26 @@ async fn execute_action(
     state: &ClientState,
 ) -> ComputerUseResponse {
     let id = request.id();
-    let (mut response, journal_screenshot) = match handle_request(&request, journal, artifacts, state).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            eprintln!("error handling request: {}", error);
-            (
-                ComputerUseResponse::Error {
-                    id,
-                    ok: false,
-                    error: error.to_string(),
-                },
-                None,
-            )
-        }
-    };
+    let (mut response, journal_screenshot) =
+        match handle_request(&request, journal, artifacts, state).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!("error handling request: {}", error);
+                if let Err(release_error) = state.input.release_all().await {
+                    eprintln!(
+                        "failed to release synthetic input after action failure: {release_error}"
+                    );
+                }
+                (
+                    ComputerUseResponse::Error {
+                        id,
+                        ok: false,
+                        error: error.to_string(),
+                    },
+                    None,
+                )
+            }
+        };
     // The full request — including typed text — goes into the journal so
     // observers can see exactly what happened between screenshots. The
     // journal is in-memory, capped, and served only to the observatory;
@@ -383,7 +548,10 @@ async fn execute_action(
 
 fn action_payload(request: serde_json::Value, response: &ComputerUseResponse) -> serde_json::Value {
     let mut payload = serde_json::json!({ "request": request, "ok": response.completed() });
-    if let ComputerUseResponse::Image { foreground_window, .. } = response {
+    if let ComputerUseResponse::Image {
+        foreground_window, ..
+    } = response
+    {
         payload["foregroundWindow"] = serde_json::json!(foreground_window);
     }
     payload
@@ -391,6 +559,7 @@ fn action_payload(request: serde_json::Value, response: &ComputerUseResponse) ->
 
 const MAX_SEQUENCE_ACTIONS: usize = 20;
 const POST_ACTION_SETTLE_MS: u64 = 250;
+const BRIEF_PAUSE_MS: u64 = 300;
 
 /// Executes a queued sequence of actions back-to-back, aborts on the first
 /// failing step, and answers with one screenshot of the final state — so a
@@ -434,14 +603,21 @@ async fn run_sequence(
                     id,
                     ok: false,
                     error: "run_sequence cannot be nested".into(),
-                }
+                };
             }
             Ok(ComputerUseRequest::PublishEvent { .. }) => {
                 return ComputerUseResponse::Error {
                     id,
                     ok: false,
                     error: "publish_event is not allowed inside run_sequence".into(),
-                }
+                };
+            }
+            Ok(ComputerUseRequest::ShutdownBackend { .. }) => {
+                return ComputerUseResponse::Error {
+                    id,
+                    ok: false,
+                    error: "shutdown_backend is not allowed inside run_sequence".into(),
+                };
             }
             Ok(step) => step,
             Err(err) => {
@@ -453,7 +629,11 @@ async fn run_sequence(
                 return ComputerUseResponse::Error {
                     id,
                     ok: false,
-                    error: format!("sequence aborted at step {}: invalid action: {}", index + 1, err),
+                    error: format!(
+                        "sequence aborted at step {}: invalid action: {}",
+                        index + 1,
+                        err
+                    ),
                 };
             }
         };
@@ -464,11 +644,19 @@ async fn run_sequence(
         let mut response = execute_action(item, step_request, journal, artifacts, state).await;
         if !response.completed() {
             match &mut response {
-                ComputerUseResponse::Error { id: response_id, error, .. } => {
+                ComputerUseResponse::Error {
+                    id: response_id,
+                    error,
+                    ..
+                } => {
                     *response_id = id;
                     *error = format!("sequence aborted at step {}: {}", executed + 1, error);
                 }
-                ComputerUseResponse::Image { id: response_id, text, .. } => {
+                ComputerUseResponse::Image {
+                    id: response_id,
+                    text,
+                    ..
+                } => {
                     *response_id = id;
                     *text = Some(format!(
                         "Sequence aborted at step {}. {}",
@@ -490,15 +678,17 @@ async fn run_sequence(
                 ok: false,
                 error: format!(
                     "sequence executed {} actions but the final screenshot failed: {}",
-                    executed,
-                    error
+                    executed, error
                 ),
-            }
+            };
         }
     };
     let event = journal.append(
         "computer.action",
-        action_payload(serde_json::json!({ "action": "run_sequence", "steps": executed }), &response),
+        action_payload(
+            serde_json::json!({ "action": "run_sequence", "steps": executed }),
+            &response,
+        ),
         journal_screenshot,
     );
     response.set_screenshot_id(event.screenshot_id.clone());
@@ -508,168 +698,229 @@ async fn run_sequence(
     response
 }
 
-    /// Executes the action and returns its response plus, for screen-capturing
-    /// actions, the full-screen PNG for the journal. State-changing actions
-    /// (clicks, drag, type, key, scroll) answer with a screenshot of the
-    /// resulting state, so the caller never needs a second round trip just to
-    /// see what happened.
-    async fn handle_request(
-        request: &ComputerUseRequest,
-        journal: &Journal,
-        artifacts: &ArtifactStore,
-        state: &ClientState,
-    ) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
-        match request {
-            ComputerUseRequest::PublishEvent { .. } => {
-                // Handled before execution reaches here; see respond_and_journal.
-                unreachable!("publish_event is not a computer action")
-            }
-            ComputerUseRequest::RunSequence { .. } => {
-                // Handled before execution reaches here; see respond_and_journal.
-                unreachable!("run_sequence is executed by run_sequence()")
-            }
-            ComputerUseRequest::GetDisplayInfo { id } => {
-                let (width, height) = pal::ScreenSampler::new()?.size_px();
-                Ok((ComputerUseResponse::DisplayInfo {
+/// Executes the action and returns its response plus, for screen-capturing
+/// actions, the full-screen PNG for the journal. State-changing actions
+/// (clicks, drag, type, key, scroll) answer with a screenshot of the
+/// resulting state, so the caller never needs a second round trip just to
+/// see what happened.
+async fn handle_request(
+    request: &ComputerUseRequest,
+    journal: &Journal,
+    artifacts: &ArtifactStore,
+    state: &ClientState,
+) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
+    match request {
+        ComputerUseRequest::PublishEvent { .. } => {
+            // Handled before execution reaches here; see respond_and_journal.
+            unreachable!("publish_event is not a computer action")
+        }
+        ComputerUseRequest::ShutdownBackend { .. } => {
+            unreachable!("shutdown_backend is handled before action execution")
+        }
+        ComputerUseRequest::RunSequence { .. } => {
+            // Handled before execution reaches here; see respond_and_journal.
+            unreachable!("run_sequence is executed by run_sequence()")
+        }
+        ComputerUseRequest::GetDisplayInfo { id } => {
+            let (width, height) = pal::ScreenSampler::new()?.size_px();
+            Ok((
+                ComputerUseResponse::DisplayInfo {
                     id: *id,
                     ok: true,
                     display: ComputerUseDisplayInfo {
                         width_px: width,
                         height_px: height,
-                    }
-                }, None))
-            }
-            ComputerUseRequest::SaveScreenshot { id, screenshot_id, path } => {
-                let png = journal
-                    .screenshot(screenshot_id)
-                    .ok_or_else(|| anyhow::anyhow!("screenshot evicted"))?;
-                let saved = artifacts.save(path, &png)?;
-                Ok((ComputerUseResponse::Saved { id: *id, ok: true, saved }, None))
-            }
-            ComputerUseRequest::GetClipboard { id } => Ok((ComputerUseResponse::Clipboard {
+                    },
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::SaveScreenshot {
+            id,
+            screenshot_id,
+            path,
+        } => {
+            let png = journal
+                .screenshot(screenshot_id)
+                .ok_or_else(|| anyhow::anyhow!("screenshot evicted"))?;
+            let saved = artifacts.save(path, &png)?;
+            Ok((
+                ComputerUseResponse::Saved {
+                    id: *id,
+                    ok: true,
+                    saved,
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::GetClipboard { id } => Ok((
+            ComputerUseResponse::Clipboard {
                 id: *id,
                 ok: true,
                 text: tokio::task::spawn_blocking(pal::get_clipboard).await??,
-            }, None)),
-            ComputerUseRequest::SetClipboard { id, text } => {
-                let text = text.clone();
-                tokio::task::spawn_blocking(move || pal::set_clipboard(text)).await??;
-                Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
-            }
-            ComputerUseRequest::CursorPosition { id } => {
-                let (x, y) = pal::cursor_position()?;
-                Ok((ComputerUseResponse::Text {
-                    id: *id,
-                    ok: true,
-                    text: format!("X={},Y={}", x, y)
-                }, None))
-            }
-            ComputerUseRequest::Zoom { id, region } => {
-                let (x0, y0, x1, y1) = *region;
-                let (x0, x1) = (std::cmp::min(x0, x1), std::cmp::max(x0, x1));
-                let (y0, y1) = (std::cmp::min(y0, y1), std::cmp::max(y0, y1));
-                let (width, height) = (x1 - x0, y1 - y0);
-                reply_screenshot(*id, Some((x0, y0, width, height))).await
             },
-            ComputerUseRequest::Wait { id, duration_seconds, } => {
-                tokio::time::sleep(Duration::from_secs_f64(*duration_seconds)).await;
-                reply_screenshot(*id, None).await
-            }
-            ComputerUseRequest::Screenshot { id } => reply_screenshot(*id, None).await,
-            ComputerUseRequest::MouseMove { id, coordinate: (x, y) } => {
-                pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                Ok((ComputerUseResponse::Empty {
-                    id: *id,
-                    ok: true
-                }, None))
-            }
-            ComputerUseRequest::LeftClick(params) |
-            ComputerUseRequest::RightClick(params) |
-            ComputerUseRequest::MiddleClick(params) |
-            ComputerUseRequest::DoubleClick(params) |
-            ComputerUseRequest::TripleClick(params) => {
-                let MouseClickParams { id, key, coordinate, expect_unchanged } = params;
-                if let Some(region) = expect_unchanged {
-                    if let Some(guarded) = click_guard(*id, *region, state).await? {
-                        return Ok(guarded);
-                    }
-                }
-                if let Some(key) = key {
-                    input::press_keys(key).await?;
-                }
-                if let Some((x, y)) = coordinate {
-                    pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                }
-                let (button, click_count) = request.mouse_clickiness().unwrap();
-                for _ in 0..click_count {
-                    pal::mouse_down(button).await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    pal::mouse_up(button).await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-                if let Some(key) = key {
-                    input::release_keys(key).await?;
-                }
-                settle().await;
-                reply_screenshot(*id, None).await
-            }
-            ComputerUseRequest::LeftMouseDown { id, coordinate: (x, y) } => {
-                pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                pal::mouse_down(MouseButton::Left).await?;
-                Ok((ComputerUseResponse::Empty {
+            None,
+        )),
+        ComputerUseRequest::SetClipboard { id, text } => {
+            let text = text.clone();
+            tokio::task::spawn_blocking(move || pal::set_clipboard(text)).await??;
+            Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
+        }
+        ComputerUseRequest::CursorPosition { id } => {
+            let (x, y) = pal::cursor_position()?;
+            Ok((
+                ComputerUseResponse::Text {
                     id: *id,
                     ok: true,
-                }, None))
+                    text: format!("X={},Y={}", x, y),
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::Zoom { id, region } => {
+            let (x0, y0, x1, y1) = *region;
+            let (x0, x1) = (std::cmp::min(x0, x1), std::cmp::max(x0, x1));
+            let (y0, y1) = (std::cmp::min(y0, y1), std::cmp::max(y0, y1));
+            let (width, height) = (x1 - x0, y1 - y0);
+            reply_screenshot(*id, Some((x0, y0, width, height))).await
+        }
+        ComputerUseRequest::BriefPause { id } => {
+            brief_pause().await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::Wait {
+            id,
+            duration_seconds,
+        } => {
+            tokio::time::sleep(Duration::from_secs_f64(*duration_seconds)).await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::Screenshot { id } => reply_screenshot(*id, None).await,
+        ComputerUseRequest::MouseMove {
+            id,
+            coordinate: (x, y),
+        } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
+        }
+        ComputerUseRequest::LeftClick(params)
+        | ComputerUseRequest::RightClick(params)
+        | ComputerUseRequest::MiddleClick(params)
+        | ComputerUseRequest::DoubleClick(params)
+        | ComputerUseRequest::TripleClick(params) => {
+            let MouseClickParams {
+                id,
+                key,
+                coordinate,
+                expect_unchanged,
+            } = params;
+            if let Some(region) = expect_unchanged {
+                if let Some(guarded) = click_guard(*id, *region, state).await? {
+                    return Ok(guarded);
+                }
             }
-            ComputerUseRequest::LeftMouseUp { id, coordinate: (x, y) } => {
+            if let Some(key) = key {
+                input::press_keys(&state.input, key).await?;
+            }
+            if let Some((x, y)) = coordinate {
                 pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                pal::mouse_up(MouseButton::Left).await?;
-                Ok((ComputerUseResponse::Empty {
-                    id: *id,
-                    ok: true,
-                }, None))
             }
-            ComputerUseRequest::LeftClickDrag { id, coordinate, start_coordinate } => {
-                pal::mouse_move_to(((*start_coordinate).0 as i32, (*start_coordinate).1 as i32)).await?;
-                pal::mouse_down(MouseButton::Left).await?;
-                pal::mouse_move_to(((*coordinate).0 as i32, (*coordinate).1 as i32)).await?;
-                pal::mouse_up(MouseButton::Left).await?;
-                settle().await;
-                reply_screenshot(*id, None).await
+            let (button, click_count) = request.mouse_clickiness().unwrap();
+            for _ in 0..click_count {
+                state.input.mouse_down(button).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                state.input.mouse_up(button).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-            ComputerUseRequest::Type { id, text } => {
-                input::type_text(text).await?;
-                settle().await;
-                reply_screenshot(*id, None).await
+            if let Some(key) = key {
+                input::release_keys(&state.input, key).await?;
             }
-            ComputerUseRequest::Key { id, text } => {
-                input::press_release_keys(text).await?;
-                settle().await;
-                reply_screenshot(*id, None).await
-            }
-            ComputerUseRequest::HoldKey { id, duration_seconds, text } => {
-                input::hold_keys(text, Duration::from_secs_f64(*duration_seconds)).await?;
-                Ok((ComputerUseResponse::Text {
+            settle().await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::LeftMouseDown {
+            id,
+            coordinate: (x, y),
+        } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            state.input.mouse_down(MouseButton::Left).await?;
+            Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
+        }
+        ComputerUseRequest::LeftMouseUp {
+            id,
+            coordinate: (x, y),
+        } => {
+            pal::mouse_move_to((*x as i32, *y as i32)).await?;
+            state.input.mouse_up(MouseButton::Left).await?;
+            Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
+        }
+        ComputerUseRequest::LeftClickDrag {
+            id,
+            coordinate,
+            start_coordinate,
+        } => {
+            pal::mouse_move_to(((*start_coordinate).0 as i32, (*start_coordinate).1 as i32))
+                .await?;
+            state.input.mouse_down(MouseButton::Left).await?;
+            pal::mouse_move_to(((*coordinate).0 as i32, (*coordinate).1 as i32)).await?;
+            state.input.mouse_up(MouseButton::Left).await?;
+            settle().await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::Type { id, text } => {
+            input::type_text(&state.input, text).await?;
+            settle().await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::Key { id, text } => {
+            input::press_release_keys(&state.input, text).await?;
+            settle().await;
+            reply_screenshot(*id, None).await
+        }
+        ComputerUseRequest::HoldKey {
+            id,
+            duration_seconds,
+            text,
+        } => {
+            input::hold_keys(
+                state.input.clone(),
+                text,
+                Duration::from_secs_f64(*duration_seconds),
+            )
+            .await?;
+            Ok((
+                ComputerUseResponse::Text {
                     id: *id,
                     ok: true,
                     text: "The specified delay will complete asynchronously.".into(),
-                }, None))
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::Scroll {
+            id,
+            scroll_amount,
+            scroll_direction,
+            coordinate,
+        } => {
+            if let Some((x, y)) = coordinate {
+                pal::mouse_move_to((*x as i32, *y as i32)).await?;
             }
-            ComputerUseRequest::Scroll { id, scroll_amount, scroll_direction, coordinate } => {
-                if let Some((x, y)) = coordinate {
-                    pal::mouse_move_to((*x as i32, *y as i32)).await?;
-                }
-                pal::mouse_scroll(scroll_amount, scroll_direction).await?;
-                settle().await;
-                reply_screenshot(*id, None).await
-            }
+            pal::mouse_scroll(scroll_amount, scroll_direction).await?;
+            settle().await;
+            reply_screenshot(*id, None).await
         }
     }
+}
 
 /// Gives the UI a beat to react before the post-action screenshot, so the
 /// returned state is the result of the action rather than mid-transition.
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(POST_ACTION_SETTLE_MS)).await;
+}
+
+async fn brief_pause() {
+    tokio::time::sleep(Duration::from_millis(BRIEF_PAUSE_MS)).await;
 }
 
 /// The click guard: when the caller marks a region `expect_unchanged`, the
@@ -717,8 +968,12 @@ fn region_changed(
     current: &ScreenshotImage,
     (x, y, w, h): (usize, usize, usize, usize),
 ) -> bool {
-    let Some(right) = x.checked_add(w) else { return true; };
-    let Some(bottom) = y.checked_add(h) else { return true; };
+    let Some(right) = x.checked_add(w) else {
+        return true;
+    };
+    let Some(bottom) = y.checked_add(h) else {
+        return true;
+    };
     let in_bounds =
         |img: &ScreenshotImage| right <= img.width() as usize && bottom <= img.height() as usize;
     if w == 0 || h == 0 || !in_bounds(last) || !in_bounds(current) {
@@ -763,36 +1018,55 @@ fn image_response(
 ) -> anyhow::Result<(ComputerUseResponse, Option<Vec<u8>>)> {
     let screenshot = &capture.image;
     let cropped = {
-        let (x, y, mut width, mut height) =
-            bounds.unwrap_or((0, 0, screenshot.width() as usize, screenshot.height() as usize));
+        let (x, y, mut width, mut height) = bounds.unwrap_or((
+            0,
+            0,
+            screenshot.width() as usize,
+            screenshot.height() as usize,
+        ));
         anyhow::ensure!(
-            x < screenshot.width() as usize && y < screenshot.height() as usize && width > 0 && height > 0,
+            x < screenshot.width() as usize
+                && y < screenshot.height() as usize
+                && width > 0
+                && height > 0,
             "screenshot region must overlap the screen and have nonzero width and height"
         );
         width = std::cmp::min(width, screenshot.width() as usize - x);
         height = std::cmp::min(height, screenshot.height() as usize - y);
-        screenshot.view(x as u32, y as u32, width as u32, height as u32).to_image()
+        screenshot
+            .view(x as u32, y as u32, width as u32, height as u32)
+            .to_image()
     };
 
     let mut full_png_bytes = Vec::new();
-    screenshot.write_to(&mut std::io::Cursor::new(&mut full_png_bytes), ImageFormat::Png)?;
+    screenshot.write_to(
+        &mut std::io::Cursor::new(&mut full_png_bytes),
+        ImageFormat::Png,
+    )?;
 
     let mut png_bytes = Vec::new();
     cropped.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)?;
     let base64_png_bytes = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-    Ok((ComputerUseResponse::Image {
-        id,
-        ok: true,
-        aborted: false,
-        text: None,
-        foreground_window: capture.foreground_window.clone(),
-        image: ComputerUseImage {
-            data: base64_png_bytes,
-            media_type: "image/png".into(),
+    Ok((
+        ComputerUseResponse::Image {
+            id,
+            ok: true,
+            aborted: false,
+            text: None,
+            foreground_window: capture.foreground_window.clone(),
+            image: ComputerUseImage {
+                data: base64_png_bytes,
+                media_type: "image/png".into(),
+            },
+            screenshot_id: None,
+            reference_screenshot: if bounds.is_none() {
+                Some(screenshot.clone())
+            } else {
+                None
+            },
         },
-        screenshot_id: None,
-        reference_screenshot: if bounds.is_none() { Some(screenshot.clone()) } else { None },
-    }, Some(full_png_bytes)))
+        Some(full_png_bytes),
+    ))
 }
 
 #[cfg(test)]
@@ -802,16 +1076,26 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     fn test_artifacts() -> Arc<ArtifactStore> {
-        let root = std::env::temp_dir().join(format!(
-            "qbt-computer-use-tests-{}",
-            std::process::id(),
-        ));
+        let root =
+            std::env::temp_dir().join(format!("qbt-computer-use-tests-{}", std::process::id(),));
         Arc::new(ArtifactStore::new(root).unwrap())
+    }
+
+    fn client_state(last_screenshot: Option<ScreenshotImage>) -> ClientState {
+        ClientState {
+            last_screenshot,
+            input: Arc::new(input::SyntheticInput::default()),
+        }
     }
 
     async fn start_test_server_with_capacity(
         max_screenshots: usize,
-    ) -> (std::net::SocketAddr, Arc<Journal>, Arc<ArtifactStore>, CancellationToken) {
+    ) -> (
+        std::net::SocketAddr,
+        Arc<Journal>,
+        Arc<ArtifactStore>,
+        CancellationToken,
+    ) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let journal = Journal::new(max_screenshots);
@@ -851,6 +1135,91 @@ mod tests {
         let mut line = String::new();
         stream.read_line(&mut line).await.unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn shutdown_backend_acknowledges_then_stops_the_server() {
+        let (addr, _journal, shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let response = send(
+            &mut client,
+            serde_json::json!({ "id": 1, "action": "shutdown_backend" }),
+        )
+        .await;
+
+        assert_eq!(response["ok"], true);
+        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled())
+            .await
+            .unwrap();
+        let reconnect = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr))
+            .await
+            .unwrap();
+        assert!(reconnect.is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_shutdown_gets_an_error_without_stopping_the_server() {
+        let (addr, _journal, shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        client
+            .get_mut()
+            .write_all(b"{\"action\":\"shutdown_backend\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        client.read_line(&mut line).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["ok"], false);
+        assert!(!shutdown.is_cancelled());
+
+        let response = publish(&mut client, 2, "test.still_alive").await;
+        assert_eq!(response["ok"], true);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn shutdown_bypasses_a_blocked_action() {
+        let (addr, _journal, shutdown) = start_test_server().await;
+        let mut action_client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        action_client
+            .get_mut()
+            .write_all(b"{\"id\":1,\"action\":\"wait\",\"durationSeconds\":60}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let mut control_client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            send(
+                &mut control_client,
+                serde_json::json!({ "id": 2, "action": "shutdown_backend" }),
+            ),
+        )
+        .await
+        .expect("shutdown must not wait for the action queue");
+        assert_eq!(response["ok"], true);
+        tokio::time::timeout(Duration::from_millis(500), shutdown.cancelled())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn brief_pause_waits_300_ms_and_returns_a_screenshot() {
+        assert_eq!(BRIEF_PAUSE_MS, 300);
+        let (addr, _journal, shutdown) = start_test_server().await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+        let started = tokio::time::Instant::now();
+        let response = send(
+            &mut client,
+            serde_json::json!({ "id": 1, "action": "brief_pause" }),
+        )
+        .await;
+
+        assert!(started.elapsed() >= Duration::from_millis(BRIEF_PAUSE_MS));
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["image"]["mediaType"], "image/png");
+        shutdown.cancel();
     }
 
     #[tokio::test]
@@ -919,7 +1288,12 @@ mod tests {
         stream.read_line(&mut line).await.unwrap();
         let response: serde_json::Value = serde_json::from_str(&line).unwrap();
         if response.get("image").is_some() {
-            assert!(response["screenshot_id"].as_str().unwrap().starts_with("shot_"));
+            assert!(
+                response["screenshot_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("shot_")
+            );
             assert_foreground_contract(&response);
         }
         response
@@ -952,7 +1326,10 @@ mod tests {
         assert_eq!(saved["id"], 2);
         assert_eq!(saved["ok"], true);
         let saved_path = PathBuf::from(saved["saved"].as_str().unwrap());
-        assert_eq!(saved_path, artifacts.root().join("runs/x/screenshots/a.png"));
+        assert_eq!(
+            saved_path,
+            artifacts.root().join("runs/x/screenshots/a.png")
+        );
         assert_eq!(
             std::fs::read(&saved_path).unwrap(),
             **journal.screenshot(screenshot_id).unwrap(),
@@ -999,15 +1376,24 @@ mod tests {
         )
         .await;
         assert_eq!(rejected["ok"], false);
-        assert!(rejected["error"].as_str().unwrap().contains("must not contain '..'"));
+        assert!(
+            rejected["error"]
+                .as_str()
+                .unwrap()
+                .contains("must not contain '..'")
+        );
         shutdown.cancel();
         std::fs::remove_dir_all(artifacts.root()).unwrap();
     }
 
     fn assert_foreground_contract(response: &serde_json::Value) {
-        let foreground = response.get("foregroundWindow").expect("every screenshot includes foregroundWindow");
+        let foreground = response
+            .get("foregroundWindow")
+            .expect("every screenshot includes foregroundWindow");
         if !foreground.is_null() {
-            let fields = foreground.as_object().expect("foregroundWindow must be null or an object");
+            let fields = foreground
+                .as_object()
+                .expect("foregroundWindow must be null or an object");
             assert_eq!(fields.len(), 2);
             for name in ["executable", "title"] {
                 let value = fields.get(name).expect("both fields must be present");
@@ -1037,12 +1423,19 @@ mod tests {
                 let wire = serde_json::to_value(&response).unwrap();
                 assert_foreground_contract(&wire);
                 assert_eq!(wire["foregroundWindow"], foreground);
-                assert_eq!(action_payload(serde_json::json!({}), &response)["foregroundWindow"], foreground);
+                assert_eq!(
+                    action_payload(serde_json::json!({}), &response)["foregroundWindow"],
+                    foreground
+                );
                 assert!(wire.get("foreground_window").is_none());
             }
         }
         let empty = ComputerUseResponse::Empty { id: 1, ok: true };
-        assert!(action_payload(serde_json::json!({}), &empty).get("foregroundWindow").is_none());
+        assert!(
+            action_payload(serde_json::json!({}), &empty)
+                .get("foregroundWindow")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1055,17 +1448,29 @@ mod tests {
             serde_json::json!({ "action": "screenshot" }),
             serde_json::json!({ "action": "wait", "durationSeconds": 0 }),
             serde_json::json!({ "action": "type", "text": "" }),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             request["id"] = serde_json::json!(index + 1);
             let response = send(&mut client, request).await;
             assert_eq!(response["ok"], true);
             assert_eq!(response["image"]["mediaType"], "image/png");
             let (_, events) = journal.subscribe_with_snapshot();
             let event = events.last().unwrap();
-            assert_eq!(event.payload.get("foregroundWindow"), response.get("foregroundWindow"));
+            assert_eq!(
+                event.payload.get("foregroundWindow"),
+                response.get("foregroundWindow")
+            );
             let png = base64::engine::general_purpose::STANDARD
-                .decode(response["image"]["data"].as_str().unwrap()).unwrap();
-            assert_eq!(*journal.screenshot(event.screenshot_id.as_deref().unwrap()).unwrap(), png);
+                .decode(response["image"]["data"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(
+                *journal
+                    .screenshot(event.screenshot_id.as_deref().unwrap())
+                    .unwrap(),
+                png
+            );
         }
         shutdown.cancel();
     }
@@ -1085,9 +1490,16 @@ mod tests {
         assert!(region_changed(&last, &current, (0, 0, 10, 10)));
 
         for region in [
-            (0, 0, 0, 1), (0, 0, 1, 0), (10, 0, 1, 1), (0, 10, 1, 1),
-            (9, 0, 2, 1), (0, 9, 1, 2), (usize::MAX, 0, 2, 1),
-            (0, usize::MAX, 1, 2), (1, 0, usize::MAX, 1), (0, 1, 1, usize::MAX),
+            (0, 0, 0, 1),
+            (0, 0, 1, 0),
+            (10, 0, 1, 1),
+            (0, 10, 1, 1),
+            (9, 0, 2, 1),
+            (0, 9, 1, 2),
+            (usize::MAX, 0, 2, 1),
+            (0, usize::MAX, 1, 2),
+            (1, 0, usize::MAX, 1),
+            (0, 1, 1, usize::MAX),
         ] {
             assert!(region_changed(&last, &last, region), "region: {region:?}");
         }
@@ -1103,7 +1515,7 @@ mod tests {
             foreground_window: None,
         };
         let full = capture.image.clone();
-        let mut state = ClientState { last_screenshot: None };
+        let mut state = client_state(None);
         let (response, _) = image_response(1, &capture, None).unwrap();
         assert!(state.last_screenshot.is_none());
         let wire = serde_json::to_value(&response).unwrap();
@@ -1116,19 +1528,34 @@ mod tests {
         let (crop_response, journal_png) = image_response(2, &capture, Some((1, 1, 2, 2))).unwrap();
         let wire = serde_json::to_value(&crop_response).unwrap();
         let png = base64::engine::general_purpose::STANDARD
-            .decode(wire["image"]["data"].as_str().unwrap()).unwrap();
+            .decode(wire["image"]["data"].as_str().unwrap())
+            .unwrap();
         assert_eq!(image::load_from_memory(&png).unwrap().dimensions(), (2, 2));
-        assert_eq!(image::load_from_memory(&journal_png.unwrap()).unwrap().to_rgba8(), full);
+        assert_eq!(
+            image::load_from_memory(&journal_png.unwrap())
+                .unwrap()
+                .to_rgba8(),
+            full
+        );
         // Preparing an unseen crop does not invalidate the caller's reference.
         assert_eq!(state.last_screenshot.as_ref(), Some(&full));
         state.record_response(crop_response);
         assert!(state.last_screenshot.is_none());
 
         state.record_response(image_response(3, &capture, None).unwrap().0);
-        for bounds in [(4, 0, 1, 1), (0, 4, 1, 1), (0, 0, 0, 1), (usize::MAX, 0, 1, 1)] {
+        for bounds in [
+            (4, 0, 1, 1),
+            (0, 4, 1, 1),
+            (0, 0, 0, 1),
+            (usize::MAX, 0, 1, 1),
+        ] {
             assert!(image_response(4, &capture, Some(bounds)).is_err());
         }
-        state.record_response(ComputerUseResponse::Error { id: 4, ok: false, error: "failed".into() });
+        state.record_response(ComputerUseResponse::Error {
+            id: 4,
+            ok: false,
+            error: "failed".into(),
+        });
         assert_eq!(state.last_screenshot.as_ref(), Some(&full));
     }
 
@@ -1138,22 +1565,37 @@ mod tests {
         let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
         // If the guard incorrectly permits input, this invalid chord fails
         // before sending any keys or reaching the mouse operations.
-        let response = send(&mut client, serde_json::json!({
-            "id": 47, "action": "left_click", "coordinate": [1, 1],
-            "key": "invalid_guard_safety_key", "expectUnchanged": [0, 0, 1, 1],
-        })).await;
+        let response = send(
+            &mut client,
+            serde_json::json!({
+                "id": 47, "action": "left_click", "coordinate": [1, 1],
+                "key": "invalid_guard_safety_key", "expectUnchanged": [0, 0, 1, 1],
+            }),
+        )
+        .await;
         assert_eq!(response["id"], 47);
         assert_eq!(response["ok"], true);
         assert_eq!(response["aborted"], true);
-        assert!(response["text"].as_str().unwrap().contains("no full-screen reference"));
+        assert!(
+            response["text"]
+                .as_str()
+                .unwrap()
+                .contains("no full-screen reference")
+        );
         assert_eq!(response["image"]["mediaType"], "image/png");
         let (_, events) = journal.subscribe_with_snapshot();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["ok"], false);
-        assert_eq!(events[0].payload.get("foregroundWindow"), response.get("foregroundWindow"));
-        let journal_png = journal.screenshot(events[0].screenshot_id.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            events[0].payload.get("foregroundWindow"),
+            response.get("foregroundWindow")
+        );
+        let journal_png = journal
+            .screenshot(events[0].screenshot_id.as_deref().unwrap())
+            .unwrap();
         let response_png = base64::engine::general_purpose::STANDARD
-            .decode(response["image"]["data"].as_str().unwrap()).unwrap();
+            .decode(response["image"]["data"].as_str().unwrap())
+            .unwrap();
         assert_eq!(*journal_png, response_png);
         shutdown.cancel();
     }
@@ -1162,11 +1604,15 @@ mod tests {
     async fn socket_commits_the_final_sequence_image_but_invalidates_it_on_zoom() {
         let (addr, journal, shutdown) = start_test_server().await;
         let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
-        let sequence = send(&mut client, serde_json::json!({
-            "id": 51, "action": "run_sequence", "actions": [
-                { "action": "screenshot" }, { "action": "cursor_position" },
-            ],
-        })).await;
+        let sequence = send(
+            &mut client,
+            serde_json::json!({
+                "id": 51, "action": "run_sequence", "actions": [
+                    { "action": "screenshot" }, { "action": "cursor_position" },
+                ],
+            }),
+        )
+        .await;
         assert_eq!(sequence["id"], 51);
         assert_eq!(sequence["ok"], true);
         assert_eq!(sequence["aborted"], false);
@@ -1175,7 +1621,10 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[2].payload["request"]["action"], "run_sequence");
         assert_eq!(events[2].payload["ok"], true);
-        assert_eq!(events[2].payload.get("foregroundWindow"), sequence.get("foregroundWindow"));
+        assert_eq!(
+            events[2].payload.get("foregroundWindow"),
+            sequence.get("foregroundWindow")
+        );
 
         let guard = serde_json::json!({
             "id": 52, "action": "left_click", "key": "invalid_guard_safety_key",
@@ -1183,16 +1632,30 @@ mod tests {
         });
         let overflow = send(&mut client, guard.clone()).await;
         assert_eq!(overflow["aborted"], true);
-        assert!(overflow["text"].as_str().unwrap().contains("outside the screenshot"));
+        assert!(
+            overflow["text"]
+                .as_str()
+                .unwrap()
+                .contains("outside the screenshot")
+        );
 
-        let crop = send(&mut client, serde_json::json!({
-            "id": 53, "action": "zoom", "region": [0, 0, 1, 1],
-        })).await;
+        let crop = send(
+            &mut client,
+            serde_json::json!({
+                "id": 53, "action": "zoom", "region": [0, 0, 1, 1],
+            }),
+        )
+        .await;
         assert_eq!(crop["ok"], true);
         assert_eq!(crop["aborted"], false);
         let after_crop = send(&mut client, guard).await;
         assert_eq!(after_crop["aborted"], true);
-        assert!(after_crop["text"].as_str().unwrap().contains("no full-screen reference"));
+        assert!(
+            after_crop["text"]
+                .as_str()
+                .unwrap()
+                .contains("no full-screen reference")
+        );
         shutdown.cancel();
     }
 
@@ -1209,59 +1672,99 @@ mod tests {
         }
         // Absent, undersized, and visibly changed baselines must all abort.
         // An unseen intermediate screenshot must not replace any of them.
-        for reference in [None, Some(ScreenshotImage::new(1, 1)), Some(changed_reference)] {
-            let mut state = ClientState { last_screenshot: reference.clone() };
+        for reference in [
+            None,
+            Some(ScreenshotImage::new(1, 1)),
+            Some(changed_reference),
+        ] {
+            let mut state = client_state(reference.clone());
             let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
             let artifacts = test_artifacts();
-            let response = respond_and_journal(serde_json::json!({
-                "id": 81, "action": "run_sequence", "actions": [
-                    { "action": "screenshot" },
-                    { "action": "left_click", "key": "invalid_guard_safety_key",
-                      "coordinate": [1, 1], "expectUnchanged": [0, 0, 2, 2] },
-                    { "action": "key", "text": "invalid_later_step_sentinel" },
-                ],
-            }), &journal, &artifacts, &state).await;
+            let response = respond_and_journal(
+                serde_json::json!({
+                    "id": 81, "action": "run_sequence", "actions": [
+                        { "action": "screenshot" },
+                        { "action": "left_click", "key": "invalid_guard_safety_key",
+                          "coordinate": [1, 1], "expectUnchanged": [0, 0, 2, 2] },
+                        { "action": "key", "text": "invalid_later_step_sentinel" },
+                    ],
+                }),
+                &journal,
+                &artifacts,
+                &state,
+            )
+            .await;
             assert!(!response.completed());
             let wire = serde_json::to_value(&response).unwrap();
             assert_eq!(wire["id"], 81);
             assert_foreground_contract(&wire);
             assert_eq!(wire["ok"], true);
             assert_eq!(wire["aborted"], true);
-            assert!(wire["text"].as_str().unwrap().contains("Sequence aborted at step 2"));
+            assert!(
+                wire["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Sequence aborted at step 2")
+            );
             assert_eq!(state.last_screenshot, reference);
             let (_, events) = journal.subscribe_with_snapshot();
-            assert_eq!(events.len(), 2, "the later action must not execute or be journaled");
+            assert_eq!(
+                events.len(),
+                2,
+                "the later action must not execute or be journaled"
+            );
             assert_eq!(events[0].payload["request"]["action"], "screenshot");
             assert_eq!(events[0].payload["ok"], true);
             assert_eq!(events[1].payload["request"]["action"], "left_click");
             assert_eq!(events[1].payload["ok"], false);
-            assert_eq!(events[1].payload.get("foregroundWindow"), wire.get("foregroundWindow"));
-            let png = base64::engine::general_purpose::STANDARD
-                .decode(wire["image"]["data"].as_str().unwrap()).unwrap();
             assert_eq!(
-                *journal.screenshot(events[1].screenshot_id.as_deref().unwrap()).unwrap(), png,
+                events[1].payload.get("foregroundWindow"),
+                wire.get("foregroundWindow")
+            );
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(wire["image"]["data"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(
+                *journal
+                    .screenshot(events[1].screenshot_id.as_deref().unwrap())
+                    .unwrap(),
+                png,
             );
             state.record_response(response);
-            assert_eq!(state.last_screenshot.unwrap(), image::load_from_memory(&png).unwrap().to_rgba8());
+            assert_eq!(
+                state.last_screenshot.unwrap(),
+                image::load_from_memory(&png).unwrap().to_rgba8()
+            );
         }
     }
 
     #[tokio::test]
     async fn sequence_error_does_not_commit_intermediate_screenshots() {
-        let state = ClientState { last_screenshot: None };
+        let state = client_state(None);
         let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
         let artifacts = test_artifacts();
-        let response = respond_and_journal(serde_json::json!({
-            "id": 91, "action": "run_sequence", "actions": [
-                { "action": "screenshot" },
-                { "action": "key", "text": "invalid_runtime_sentinel" },
-                { "action": "cursor_position" },
-            ],
-        }), &journal, &artifacts, &state).await;
+        let response = respond_and_journal(
+            serde_json::json!({
+                "id": 91, "action": "run_sequence", "actions": [
+                    { "action": "screenshot" },
+                    { "action": "key", "text": "invalid_runtime_sentinel" },
+                    { "action": "cursor_position" },
+                ],
+            }),
+            &journal,
+            &artifacts,
+            &state,
+        )
+        .await;
         let wire = serde_json::to_value(response).unwrap();
         assert_eq!(wire["id"], 91);
         assert_eq!(wire["ok"], false);
-        assert!(wire["error"].as_str().unwrap().contains("aborted at step 2"));
+        assert!(
+            wire["error"]
+                .as_str()
+                .unwrap()
+                .contains("aborted at step 2")
+        );
         assert!(state.last_screenshot.is_none());
         let (_, events) = journal.subscribe_with_snapshot();
         assert_eq!(events.len(), 2);
@@ -1279,7 +1782,12 @@ mod tests {
         )
         .await;
         assert_eq!(empty["ok"], false);
-        assert!(empty["error"].as_str().unwrap().contains("at least one action"));
+        assert!(
+            empty["error"]
+                .as_str()
+                .unwrap()
+                .contains("at least one action")
+        );
 
         let too_many_actions: Vec<serde_json::Value> = (0..21)
             .map(|i| serde_json::json!({ "action": "mouse_move", "coordinate": [1, 1], "id": i }))
@@ -1300,7 +1808,12 @@ mod tests {
         )
         .await;
         assert_eq!(nested["ok"], false);
-        assert!(nested["error"].as_str().unwrap().contains("cannot be nested"));
+        assert!(
+            nested["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be nested")
+        );
 
         let bad_step = send(
             &mut client,
@@ -1312,6 +1825,9 @@ mod tests {
         .await;
         assert_eq!(bad_step["ok"], false);
         let error = bad_step["error"].as_str().unwrap();
-        assert!(error.contains("aborted at step 2"), "unexpected error: {error}");
+        assert!(
+            error.contains("aborted at step 2"),
+            "unexpected error: {error}"
+        );
     }
 }

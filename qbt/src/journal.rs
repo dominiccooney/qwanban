@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-const MAX_EVENTS: usize = 1000;
+const MAX_EVENTS: usize = 500;
 const BROADCAST_CAPACITY: usize = 256;
 
 pub(crate) const DEFAULT_MAX_SCREENSHOTS: usize = 200;
@@ -98,9 +98,15 @@ impl Journal {
     /// duplicate.
     pub(crate) fn subscribe_with_snapshot(
         &self,
-    ) -> (broadcast::Receiver<Arc<JournalEvent>>, Vec<Arc<JournalEvent>>) {
+    ) -> (
+        broadcast::Receiver<Arc<JournalEvent>>,
+        Vec<Arc<JournalEvent>>,
+    ) {
         let state = self.state.lock().unwrap();
-        (self.sender.subscribe(), state.events.iter().cloned().collect())
+        (
+            self.sender.subscribe(),
+            state.events.iter().cloned().collect(),
+        )
     }
 
     pub(crate) fn screenshot(&self, id: &str) -> Option<Arc<Vec<u8>>> {
@@ -181,22 +187,51 @@ mod tests {
         let second = journal.append("action", serde_json::json!({}), Some(vec![2]));
         let third = journal.append("action", serde_json::json!({}), Some(vec![3]));
 
-        assert!(journal.screenshot(first.screenshot_id.as_deref().unwrap()).is_none());
+        assert!(
+            journal
+                .screenshot(first.screenshot_id.as_deref().unwrap())
+                .is_none()
+        );
         let range = journal
             .screenshot_range(
                 second.screenshot_id.as_deref().unwrap(),
                 third.screenshot_id.as_deref().unwrap(),
             )
             .unwrap();
-        assert_eq!(range.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["shot_3", "shot_4"]);
-        assert_eq!(range.iter().map(|(_, png)| png[0]).collect::<Vec<_>>(), vec![2, 3]);
         assert_eq!(
-            journal.screenshot_range("shot_1", "shot_4").unwrap_err().to_string(),
+            range.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["shot_3", "shot_4"]
+        );
+        assert_eq!(
+            range.iter().map(|(_, png)| png[0]).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(
+            journal
+                .screenshot_range("shot_1", "shot_4")
+                .unwrap_err()
+                .to_string(),
             "screenshot evicted: shot_1",
         );
         assert_eq!(
-            journal.screenshot_range("shot_4", "shot_3").unwrap_err().to_string(),
+            journal
+                .screenshot_range("shot_4", "shot_3")
+                .unwrap_err()
+                .to_string(),
             "screenshot range is not in journal order",
         );
+    }
+
+    #[test]
+    fn event_retention_keeps_only_the_newest_events() {
+        let journal = Journal::new(DEFAULT_MAX_SCREENSHOTS);
+        for n in 0..(MAX_EVENTS + 2) {
+            journal.append("event", serde_json::json!({ "n": n }), None);
+        }
+
+        let (_, snapshot) = journal.subscribe_with_snapshot();
+        assert_eq!(snapshot.len(), MAX_EVENTS);
+        assert_eq!(snapshot.first().unwrap().seq, 3);
+        assert_eq!(snapshot.last().unwrap().seq, (MAX_EVENTS + 2) as u64);
     }
 }

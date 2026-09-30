@@ -1,6 +1,6 @@
+use anyhow::{Context, anyhow};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
-use anyhow::{anyhow, Context};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, Screen};
@@ -36,7 +36,9 @@ impl KeyboardState {
         // u16 to avoid ever panicking on subtraction overflow in a malformed setup.
         let count = (max_keycode as u16 - min_keycode as u16 + 1) as u8;
 
-        let reply = conn.get_keyboard_mapping(min_keycode, count)?.reply()
+        let reply = conn
+            .get_keyboard_mapping(min_keycode, count)?
+            .reply()
             .context("querying the keyboard mapping")?;
         let keysyms_per_keycode = reply.keysyms_per_keycode as usize;
 
@@ -51,7 +53,9 @@ impl KeyboardState {
             if let Some(&level0) = chunk.first()
                 && level0 != 0
             {
-                keysym_to_keycode.entry(Keysym::from(level0)).or_insert(keycode);
+                keysym_to_keycode
+                    .entry(Keysym::from(level0))
+                    .or_insert(keycode);
             }
             for (level, &raw) in chunk.iter().take(2).enumerate() {
                 if raw != 0 {
@@ -87,15 +91,20 @@ pub(crate) struct X11Connection {
 }
 
 fn connect() -> anyhow::Result<X11Connection> {
-    let (conn, screen_num) = RustConnection::connect(None).context("connecting to the X11 server")?;
+    let (conn, screen_num) =
+        RustConnection::connect(None).context("connecting to the X11 server")?;
     let screen = conn.setup().roots[screen_num].clone();
 
     // XFixes requires the client to negotiate a version before using its requests, such as
     // GetCursorImage, which we use to composite the cursor into screenshots.
-    conn.xfixes_query_version(6, 0)?.reply().context("negotiating the XFIXES extension version")?;
+    conn.xfixes_query_version(6, 0)?
+        .reply()
+        .context("negotiating the XFIXES extension version")?;
     // XTEST doesn't strictly require this, but negotiating a version up front surfaces a
     // clear error immediately if the extension is missing, rather than on the first input.
-    conn.xtest_get_version(2, 2)?.reply().context("negotiating the XTEST extension version")?;
+    conn.xtest_get_version(2, 2)?
+        .reply()
+        .context("negotiating the XTEST extension version")?;
 
     Ok(X11Connection {
         conn,
@@ -118,7 +127,10 @@ pub(crate) fn connection() -> anyhow::Result<&'static X11Connection> {
 /// a receiving application can then translate delayed events without observing a later
 /// character's mapping. Every mapping level contains the same symbol so Shift and Caps Lock
 /// cannot change literal typed text.
-pub(crate) fn keystrokes_for_text(x11: &X11Connection, text: &str) -> anyhow::Result<Vec<KeyStroke>> {
+pub(crate) fn keystrokes_for_text(
+    x11: &X11Connection,
+    text: &str,
+) -> anyhow::Result<Vec<KeyStroke>> {
     let mut guard = x11.keyboard.lock().unwrap();
     if guard.is_none() {
         *guard = Some(KeyboardState::load(&x11.conn)?);
@@ -144,12 +156,10 @@ pub(crate) fn keystrokes_for_text(x11: &X11Connection, text: &str) -> anyhow::Re
     for keysym in missing_keysyms {
         let keycode = state.unused_typed_keycodes.pop_front().unwrap();
         let row = stable_mapping_row(keysym, state.keysyms_per_keycode);
-        x11.conn.change_keyboard_mapping(
-            1,
-            keycode,
-            state.keysyms_per_keycode,
-            &row,
-        )?.check().context("installing a stable typed-character mapping")?;
+        x11.conn
+            .change_keyboard_mapping(1, keycode, state.keysyms_per_keycode, &row)?
+            .check()
+            .context("installing a stable typed-character mapping")?;
         state.typed_keysym_to_keystroke.insert(
             keysym,
             KeyStroke {
@@ -158,7 +168,9 @@ pub(crate) fn keystrokes_for_text(x11: &X11Connection, text: &str) -> anyhow::Re
             },
         );
     }
-    x11.conn.sync().context("synchronizing typed-character mappings")?;
+    x11.conn
+        .sync()
+        .context("synchronizing typed-character mappings")?;
 
     Ok(text
         .chars()
@@ -188,7 +200,8 @@ pub(crate) fn keycode_for_keysym(x11: &X11Connection, keysym: Keysym) -> anyhow:
     if state.scratch_mapped_keysym != Some(keysym) {
         let mut row = vec![0u32; state.keysyms_per_keycode as usize];
         row[0] = keysym.raw();
-        x11.conn.change_keyboard_mapping(1, state.scratch_keycode, state.keysyms_per_keycode, &row)?
+        x11.conn
+            .change_keyboard_mapping(1, state.scratch_keycode, state.keysyms_per_keycode, &row)?
             .ignore_error();
         x11.conn.flush()?;
         state.scratch_mapped_keysym = Some(keysym);

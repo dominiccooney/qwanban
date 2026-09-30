@@ -1,6 +1,10 @@
-use anyhow::{anyhow, bail, Context};
-use windows::Win32::Foundation::{HWND, ERROR_INVALID_PARAMETER, RECT};
-use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC, SRCCOPY, SelectObject, HGDIOBJ, HBITMAP};
+use anyhow::{Context, anyhow, bail};
+use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
+    SRCCOPY, SelectObject,
+};
 use windows::Win32::UI::HiDpi::{PROCESS_PER_MONITOR_DPI_AWARE, SetProcessDpiAwareness};
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetDesktopWindow,
@@ -26,10 +30,7 @@ impl DesktopDC {
                 ReleaseDC(None, hdc);
                 bail!("failed to get desktop device context");
             }
-            Ok(Self {
-                hwnd,
-                hdc,
-            })
+            Ok(Self { hwnd, hdc })
         }
     }
 }
@@ -65,7 +66,7 @@ impl Drop for OwnedHBITMAP {
 }
 
 struct OwnedHDC {
-    hdc: HDC
+    hdc: HDC,
 }
 
 impl OwnedHDC {
@@ -73,9 +74,7 @@ impl OwnedHDC {
         if hdc.is_invalid() {
             bail!("HDC is invalid");
         }
-        Ok(Self {
-            hdc
-        })
+        Ok(Self { hdc })
     }
 }
 
@@ -135,8 +134,10 @@ impl ScreenSampler {
             GetWindowRect(desktop.hwnd, &mut rect)?;
             let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
 
-            let h_bitmap = OwnedHBITMAP::adopt(CreateCompatibleBitmap(desktop.hdc, width, height)).context("creating bitmap to copy screen contents")?;
-            let hdc_memory = OwnedHDC::adopt(CreateCompatibleDC(Some(desktop.hdc))).context("creating memory device context")?;
+            let h_bitmap = OwnedHBITMAP::adopt(CreateCompatibleBitmap(desktop.hdc, width, height))
+                .context("creating bitmap to copy screen contents")?;
+            let hdc_memory = OwnedHDC::adopt(CreateCompatibleDC(Some(desktop.hdc)))
+                .context("creating memory device context")?;
             let switch = DeviceContextBitmapSwitcheroo::select(hdc_memory, h_bitmap);
 
             Ok(Self {
@@ -148,7 +149,10 @@ impl ScreenSampler {
     }
 
     pub(crate) fn size_px(&self) -> (usize, usize) {
-        ((self.rect.right - self.rect.left) as usize, (self.rect.bottom - self.rect.top) as usize)
+        (
+            (self.rect.right - self.rect.left) as usize,
+            (self.rect.bottom - self.rect.top) as usize,
+        )
     }
 
     pub(crate) fn pixel_buffer_size_u8(&self) -> usize {

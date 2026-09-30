@@ -92,7 +92,7 @@ fn post_mouse_move(x: i32, y: i32) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MouseButton {
     Left,
     Right,

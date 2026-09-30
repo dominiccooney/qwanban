@@ -1,18 +1,22 @@
-use std::time::Duration;
 use anyhow::anyhow;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, GetForegroundWindow, GetWindowThreadProcessId, CURSORINFO};
+use std::time::Duration;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
-use winput::{Mouse, Input, Vk, WheelDirection};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CURSORINFO, GetCursorInfo, GetForegroundWindow, GetWindowThreadProcessId,
+};
+use winput::{Input, Mouse, Vk, WheelDirection};
 
-use crate::input::Key;
 use crate::computer_use::ScrollDirection;
+use crate::input::Key;
 
 fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
     match key {
         // These generate KEYEVENTF_UNICODE 'keys' which aren't real key codes. These send text
         // (in the 0-0xffff range) with good fidelity regardless of keyboard layout, but they are
         // not keyboard keys. Games, shortcuts, etc. do not understand these events.
-        Key::Typed(ch) => Input::from_char(ch, action).ok_or_else(|| anyhow!("invalid typed character '{}'", ch)),
+        Key::Typed(ch) => {
+            Input::from_char(ch, action).ok_or_else(|| anyhow!("invalid typed character '{}'", ch))
+        }
 
         // These generate keyboard scan codes. They do work in shortcuts, etc.
         // Note, this discards modifiers (alt, shift, etc.).
@@ -29,7 +33,7 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
                 let vk_code = (scan & 0xff) as u8;
                 Ok(Input::from_vk(Vk::from_u8(vk_code), action))
             }
-        }
+        },
 
         Key::Alt => Ok(Input::from_vk(Vk::Alt, action)),
         Key::BackSpace => Ok(Input::from_vk(Vk::Backspace, action)),
@@ -38,21 +42,24 @@ fn input_of_key(key: Key, action: winput::Action) -> anyhow::Result<Input> {
         Key::Down => Ok(Input::from_vk(Vk::DownArrow, action)),
         Key::End => Ok(Input::from_vk(Vk::End, action)),
         Key::Escape => Ok(Input::from_vk(Vk::Escape, action)),
-        Key::F(n) => Ok(Input::from_vk(match n {
-            1 => Vk::F1,
-            2 => Vk::F2,
-            3 => Vk::F3,
-            4 => Vk::F4,
-            5 => Vk::F5,
-            6 => Vk::F6,
-            7 => Vk::F7,
-            8 => Vk::F8,
-            9 => Vk::F9,
-            10 => Vk::F10,
-            11 => Vk::F11,
-            12 => Vk::F12,
-            _ => unreachable!(),
-        }, action)),
+        Key::F(n) => Ok(Input::from_vk(
+            match n {
+                1 => Vk::F1,
+                2 => Vk::F2,
+                3 => Vk::F3,
+                4 => Vk::F4,
+                5 => Vk::F5,
+                6 => Vk::F6,
+                7 => Vk::F7,
+                8 => Vk::F8,
+                9 => Vk::F9,
+                10 => Vk::F10,
+                11 => Vk::F11,
+                12 => Vk::F12,
+                _ => unreachable!(),
+            },
+            action,
+        )),
         Key::Home => Ok(Input::from_vk(Vk::Home, action)),
         Key::Left => Ok(Input::from_vk(Vk::LeftArrow, action)),
         Key::PageDown => Ok(Input::from_vk(Vk::PageDown, action)),
@@ -91,8 +98,13 @@ pub(crate) fn cursor_position() -> anyhow::Result<(usize, usize)> {
         cbSize: size_of::<CURSORINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetCursorInfo(&mut cursor_info)?; }
-    Ok((cursor_info.ptScreenPos.x as usize, cursor_info.ptScreenPos.y as usize))
+    unsafe {
+        GetCursorInfo(&mut cursor_info)?;
+    }
+    Ok((
+        cursor_info.ptScreenPos.x as usize,
+        cursor_info.ptScreenPos.y as usize,
+    ))
 }
 
 pub(crate) async fn mouse_move_to((end_x, end_y): (i32, i32)) -> anyhow::Result<()> {
@@ -116,7 +128,7 @@ pub(crate) async fn mouse_move_to((end_x, end_y): (i32, i32)) -> anyhow::Result<
     Ok(())
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MouseButton {
     Left,
     Right,
@@ -156,12 +168,13 @@ pub(crate) async fn mouse_scroll(clicks: &f64, direction: &ScrollDirection) -> a
         ScrollDirection::Up | ScrollDirection::Left => -1.0,
         ScrollDirection::Down | ScrollDirection::Right => 1.0,
     };
-    let input = Input::from_wheel((sign * *clicks) as f32, match direction {
-        ScrollDirection::Up |
-        ScrollDirection::Down => WheelDirection::Vertical,
-        ScrollDirection::Left |
-        ScrollDirection::Right => WheelDirection::Horizontal,
-    });
+    let input = Input::from_wheel(
+        (sign * *clicks) as f32,
+        match direction {
+            ScrollDirection::Up | ScrollDirection::Down => WheelDirection::Vertical,
+            ScrollDirection::Left | ScrollDirection::Right => WheelDirection::Horizontal,
+        },
+    );
     if winput::send_inputs(&[input]) == 1 {
         Ok(())
     } else {

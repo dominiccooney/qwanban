@@ -118,6 +118,17 @@
 	function onImageLoad(size: { width: number; height: number }): void {
 		imageSize = size;
 	}
+	let resetGeneration = -1;
+	function resetForGeneration(generation: number): void {
+		if (resetGeneration === generation) {
+			return;
+		}
+		resetGeneration = generation;
+		pinnedSeq = undefined;
+		expandedRuns.clear();
+		imageSize = undefined;
+	}
+	$effect(() => resetForGeneration(host.generation));
 
 	/**
 	 * ArrowUp/ArrowDown pin the row above/below. Rows are newest-first, so
@@ -159,7 +170,9 @@
 	// Keep the previous frame up while a newly selected screenshot fetches.
 	let displayScreenshotUrl: string | undefined = $state(undefined);
 	$effect(() => {
-		if (shownScreenshotUrl) {
+		if (!shownScreenshotEvent) {
+			displayScreenshotUrl = undefined;
+		} else if (shownScreenshotUrl) {
 			displayScreenshotUrl = shownScreenshotUrl;
 		}
 	});

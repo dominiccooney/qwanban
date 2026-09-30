@@ -10,15 +10,14 @@
 
 use std::thread;
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW,
+    DESKTOP_DELETE, DESKTOP_ENUMERATE, DESKTOP_HOOKCONTROL, DESKTOP_JOURNALPLAYBACK,
+    DESKTOP_JOURNALRECORD, DESKTOP_READ_CONTROL, DESKTOP_READOBJECTS, DESKTOP_SWITCHDESKTOP,
+    DESKTOP_WRITEOBJECTS, HDESK, SetThreadDesktop,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
-};
-use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEMENU,
-    DESKTOP_CREATEWINDOW, DESKTOP_DELETE, DESKTOP_ENUMERATE, DESKTOP_HOOKCONTROL,
-    DESKTOP_JOURNALPLAYBACK, DESKTOP_JOURNALRECORD, DESKTOP_READOBJECTS,
-    DESKTOP_READ_CONTROL, DESKTOP_SWITCHDESKTOP, DESKTOP_WRITEOBJECTS, HDESK,
-    SetThreadDesktop,
 };
 use windows::core::{PCWSTR, w};
 
@@ -66,7 +65,10 @@ fn sendinput_from_non_input_desktop() {
     // desktop in an interactive session. Injection should succeed.
     let (inserted, gle) = send_zero_move();
     println!("control  (input desktop):     inserted={inserted} gle={gle}");
-    assert_eq!(inserted, 1, "control SendInput on the input desktop should work");
+    assert_eq!(
+        inserted, 1,
+        "control SendInput on the input desktop should work"
+    );
 
     // Probe: a fresh thread bound via SetThreadDesktop to a newly created
     // desktop in the same window station.
@@ -87,12 +89,9 @@ fn sendinput_from_non_input_desktop() {
         let (tx, rx) = std::sync::mpsc::channel();
         // HDESK is a raw pointer, so send it across the thread as usize.
         let desk_addr = desk.0 as usize;
-        thread::spawn(move || {
-            unsafe {
-                SetThreadDesktop(HDESK(desk_addr as *mut core::ffi::c_void))
-                    .expect("SetThreadDesktop");
-                let _ = tx.send(send_zero_move());
-            }
+        thread::spawn(move || unsafe {
+            SetThreadDesktop(HDESK(desk_addr as *mut core::ffi::c_void)).expect("SetThreadDesktop");
+            let _ = tx.send(send_zero_move());
         })
         .join()
         .expect("probe thread panicked");

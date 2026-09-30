@@ -1,7 +1,8 @@
-use std::time::Duration;
 use crate::pal;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Key {
     Alt, // Note, called alt (lowercase) in X11 keysym spelling
     BackSpace,
@@ -14,7 +15,7 @@ pub(crate) enum Key {
     Home,
     Left,
     PageDown, // Note, called Page_Down in X11 keysym spelling
-    PageUp, // Note, called Page_Up in X11 keysym spelling
+    PageUp,   // Note, called Page_Up in X11 keysym spelling
     Return,
     Right,
     Shift, // Note, called shift (lowercase) in X11 keysym spelling
@@ -22,8 +23,90 @@ pub(crate) enum Key {
     Tab,
     Up,
 
-    Typed(char), // A typed character, e.g. 'a', '/', etc.
+    Typed(char),   // A typed character, e.g. 'a', '/', etc.
     Literal(char), // A character used in a chord, e.g. the 'a' in ctrl+a
+}
+
+#[derive(Default)]
+struct HeldInputs {
+    keys: Vec<Key>,
+    mouse_buttons: Vec<pal::MouseButton>,
+}
+
+/// Owns every synthetic key and mouse button held by one agent connection.
+/// The connection releases this complete set before its lifecycle ends.
+#[derive(Default)]
+pub(crate) struct SyntheticInput {
+    held: Mutex<HeldInputs>,
+    hold_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl SyntheticInput {
+    fn key_down(&self, key: Key) -> anyhow::Result<()> {
+        pal::send_key_down(key)?;
+        self.held.lock().unwrap().keys.push(key);
+        Ok(())
+    }
+
+    fn key_up(&self, key: Key) -> anyhow::Result<()> {
+        pal::send_key_up(key)?;
+        let mut held = self.held.lock().unwrap();
+        if let Some(index) = held.keys.iter().rposition(|candidate| *candidate == key) {
+            held.keys.remove(index);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn mouse_down(&self, button: pal::MouseButton) -> anyhow::Result<()> {
+        pal::mouse_down(button).await?;
+        self.held.lock().unwrap().mouse_buttons.push(button);
+        Ok(())
+    }
+
+    pub(crate) async fn mouse_up(&self, button: pal::MouseButton) -> anyhow::Result<()> {
+        pal::mouse_up(button).await?;
+        let mut held = self.held.lock().unwrap();
+        if let Some(index) = held
+            .mouse_buttons
+            .iter()
+            .rposition(|candidate| *candidate == button)
+        {
+            held.mouse_buttons.remove(index);
+        }
+        Ok(())
+    }
+
+    /// Releases all input still owned by this connection. Every release is
+    /// attempted even if an earlier platform call fails.
+    pub(crate) async fn release_all(&self) -> anyhow::Result<()> {
+        for task in std::mem::take(&mut *self.hold_tasks.lock().unwrap()) {
+            task.abort();
+        }
+        let (mut keys, mut mouse_buttons) = {
+            let mut held = self.held.lock().unwrap();
+            (
+                std::mem::take(&mut held.keys),
+                std::mem::take(&mut held.mouse_buttons),
+            )
+        };
+        keys.reverse();
+        mouse_buttons.reverse();
+        let mut first_error = None;
+        for key in keys {
+            if let Err(error) = pal::send_key_up(key) {
+                first_error.get_or_insert(error);
+            }
+        }
+        for button in mouse_buttons {
+            if let Err(error) = pal::mouse_up(button).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }
 
 pub(crate) async fn send_input_demo() -> anyhow::Result<()> {
@@ -113,16 +196,16 @@ fn parse_key_token(token: &str) -> Result<Key, String> {
     ))
 }
 
-pub(crate) async fn type_text(text: &str) -> anyhow::Result<()> {
+pub(crate) async fn type_text(_input: &SyntheticInput, text: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     return pal::type_text(text).await;
 
     #[cfg(not(target_os = "linux"))]
     for ch in text.chars().into_iter() {
         let key = Key::Typed(ch);
-        pal::send_key_down(key)?;
+        _input.key_down(key)?;
         tokio::time::sleep(Duration::from_millis(60)).await;
-        pal::send_key_up(key)?;
+        _input.key_up(key)?;
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
@@ -144,28 +227,28 @@ async fn per_key<F: Fn(Key) -> anyhow::Result<()>>(keys: &str, fun: F) -> anyhow
     Ok(())
 }
 
-pub(crate) async fn press_keys(keys: &str) -> anyhow::Result<()> {
-    per_key(keys, pal::send_key_down).await?;
+pub(crate) async fn press_keys(input: &SyntheticInput, keys: &str) -> anyhow::Result<()> {
+    per_key(keys, |key| input.key_down(key)).await?;
     Ok(())
 }
 
-pub(crate) async fn release_keys(keys: &str) -> anyhow::Result<()> {
-    per_key(keys, pal::send_key_up).await?;
+pub(crate) async fn release_keys(input: &SyntheticInput, keys: &str) -> anyhow::Result<()> {
+    per_key(keys, |key| input.key_up(key)).await?;
     Ok(())
 }
 
 // Presses the specified keys, then releases them. Returns after the keys have been be released.
-pub(crate) async fn press_release_keys(keys: &str) -> anyhow::Result<()> {
+pub(crate) async fn press_release_keys(input: &SyntheticInput, keys: &str) -> anyhow::Result<()> {
     let mut keys = parse_keys(keys)
         .map_err(|error| anyhow::anyhow!("error parsing keystroke '{keys}': {error}"))?;
     for key in &keys {
-        pal::send_key_down(*key)?;
+        input.key_down(*key)?;
         tokio::time::sleep(Duration::from_millis(6)).await;
     }
     tokio::time::sleep(Duration::from_millis(16)).await;
     keys.reverse();
     for key in keys {
-        pal::send_key_up(key)?;
+        input.key_up(key)?;
         tokio::time::sleep(Duration::from_millis(4)).await;
     }
     Ok(())
@@ -173,20 +256,29 @@ pub(crate) async fn press_release_keys(keys: &str) -> anyhow::Result<()> {
 
 // Presses the specified keys and returns. Asynchronously, after the specified duration has elapsed,
 // releases the keys.
-pub(crate) async fn hold_keys(keys: &str, duration: Duration) -> anyhow::Result<()> {
+pub(crate) async fn hold_keys(
+    input: Arc<SyntheticInput>,
+    keys: &str,
+    duration: Duration,
+) -> anyhow::Result<()> {
     let keys = parse_keys(keys)
         .map_err(|error| anyhow::anyhow!("error parsing keystroke '{keys}': {error}"))?;
     for key in &keys {
-        pal::send_key_down(*key)?;
+        input.key_down(*key)?;
     }
-    // TODO: return this future and track which keys are down when
-    tokio::task::spawn(async move {
+    let task_input = input.clone();
+    let task = tokio::task::spawn(async move {
         tokio::time::sleep(duration).await;
         eprintln!("releasing keys {:?}", keys);
         for key in keys {
-            pal::send_key_up(key).unwrap();
+            if let Err(error) = task_input.key_up(key) {
+                eprintln!("failed to release held key: {error}");
+            }
         }
     });
+    let mut tasks = input.hold_tasks.lock().unwrap();
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
     Ok(())
 }
 
@@ -201,7 +293,10 @@ mod tests {
 
     #[test]
     fn parse_compound_keystroke() {
-        assert_eq!(parse_keys("ctrl+space"), Ok(vec![Key::Ctrl, Key::Typed(' ')]));
+        assert_eq!(
+            parse_keys("ctrl+space"),
+            Ok(vec![Key::Ctrl, Key::Typed(' ')])
+        );
     }
 
     #[test]
@@ -228,7 +323,10 @@ mod tests {
             parse_keys("ctrl+alt+delete"),
             Ok(vec![Key::Ctrl, Key::Alt, Key::Delete])
         );
-        assert_eq!(parse_keys("meta+a"), Ok(vec![Key::Super, Key::Literal('a')]));
+        assert_eq!(
+            parse_keys("meta+a"),
+            Ok(vec![Key::Super, Key::Literal('a')])
+        );
         assert_eq!(parse_keys("cmd+c"), Ok(vec![Key::Super, Key::Literal('c')]));
         assert_eq!(parse_keys("F5"), Ok(vec![Key::F(5)]));
         assert_eq!(parse_keys("Return"), Ok(vec![Key::Return]));
@@ -236,7 +334,10 @@ mod tests {
         assert_eq!(parse_keys("f1"), Ok(vec![Key::F(1)]));
         assert_eq!(parse_keys("f12"), Ok(vec![Key::F(12)]));
         assert_eq!(parse_keys("CtRl+A"), Ok(vec![Key::Ctrl, Key::Literal('A')]));
-        assert_eq!(parse_keys("ctrl+plus"), Ok(vec![Key::Ctrl, Key::Typed('+')]));
+        assert_eq!(
+            parse_keys("ctrl+plus"),
+            Ok(vec![Key::Ctrl, Key::Typed('+')])
+        );
         assert_eq!(parse_keys("f"), Ok(vec![Key::Literal('f')]));
     }
 
@@ -246,9 +347,15 @@ mod tests {
         let result = per_key("ctrl+wondow", |_| {
             calls.set(calls.get() + 1);
             Ok(())
-        }).await;
+        })
+        .await;
 
-        assert!(result.unwrap_err().to_string().contains("unknown key 'wondow'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown key 'wondow'")
+        );
         assert_eq!(calls.get(), 0);
     }
 }

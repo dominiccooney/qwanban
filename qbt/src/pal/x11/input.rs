@@ -1,14 +1,19 @@
-use std::time::Duration;
 use anyhow::Context;
-use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
-use x11rb::protocol::xtest::ConnectionExt as _;
+use std::time::Duration;
 use x11rb::CURRENT_TIME;
-use xkeysym::{key, Keysym};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{
+    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
+    KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
+};
+use x11rb::protocol::xtest::ConnectionExt as _;
+use xkeysym::{Keysym, key};
 
-use crate::input::Key;
 use crate::computer_use::ScrollDirection;
-use crate::pal::x11_connection::{connection, keycode_for_keysym, keystrokes_for_text, KeyStroke, X11Connection};
+use crate::input::Key;
+use crate::pal::x11_connection::{
+    KeyStroke, X11Connection, connection, keycode_for_keysym, keystrokes_for_text,
+};
 
 // See libX11 X11/keysymdef.h. Named keys map onto their X11 keysym; typed and chord-literal
 // characters both resolve through Keysym::from_char, since XTEST has no direct analog of
@@ -38,8 +43,23 @@ fn keysym_of_key(key: Key) -> Keysym {
     }
 }
 
-fn send_fake_input(x11: &X11Connection, type_: u8, detail: u8, root_x: i16, root_y: i16) -> anyhow::Result<()> {
-    x11.conn.xtest_fake_input(type_, detail, CURRENT_TIME, x11.screen.root, root_x, root_y, 0)?
+fn send_fake_input(
+    x11: &X11Connection,
+    type_: u8,
+    detail: u8,
+    root_x: i16,
+    root_y: i16,
+) -> anyhow::Result<()> {
+    x11.conn
+        .xtest_fake_input(
+            type_,
+            detail,
+            CURRENT_TIME,
+            x11.screen.root,
+            root_x,
+            root_y,
+            0,
+        )?
         .check()
         .context("sending a synthetic input event")?;
     x11.conn.flush()?;
@@ -95,7 +115,11 @@ pub(crate) fn send_key_up(key: Key) -> anyhow::Result<()> {
 
 pub(crate) fn cursor_position() -> anyhow::Result<(usize, usize)> {
     let x11 = connection()?;
-    let reply = x11.conn.query_pointer(x11.screen.root)?.reply().context("querying the pointer position")?;
+    let reply = x11
+        .conn
+        .query_pointer(x11.screen.root)?
+        .reply()
+        .context("querying the pointer position")?;
     Ok((reply.root_x as usize, reply.root_y as usize))
 }
 
@@ -121,7 +145,7 @@ pub(crate) async fn mouse_move_to((end_x, end_y): (i32, i32)) -> anyhow::Result<
     send_fake_input(x11, MOTION_NOTIFY_EVENT, 0, end_x as i16, end_y as i16)
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MouseButton {
     Left,
     Right,
@@ -140,11 +164,23 @@ impl MouseButton {
 }
 
 pub(crate) async fn mouse_down(button: MouseButton) -> anyhow::Result<()> {
-    send_fake_input(connection()?, BUTTON_PRESS_EVENT, button.button_number(), 0, 0)
+    send_fake_input(
+        connection()?,
+        BUTTON_PRESS_EVENT,
+        button.button_number(),
+        0,
+        0,
+    )
 }
 
 pub(crate) async fn mouse_up(button: MouseButton) -> anyhow::Result<()> {
-    send_fake_input(connection()?, BUTTON_RELEASE_EVENT, button.button_number(), 0, 0)
+    send_fake_input(
+        connection()?,
+        BUTTON_RELEASE_EVENT,
+        button.button_number(),
+        0,
+        0,
+    )
 }
 
 pub(crate) async fn mouse_scroll(clicks: &f64, direction: &ScrollDirection) -> anyhow::Result<()> {
