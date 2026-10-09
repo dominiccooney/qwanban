@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "qbt",
+    "control-tower",
 ]
 resolver = "2"

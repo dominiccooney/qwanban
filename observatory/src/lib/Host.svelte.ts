@@ -41,7 +41,10 @@ export class Host {
 	public screenshots = new SvelteMap<string, string>();
 	private pendingFetches = new SvelteSet<string>();
 
-	constructor(public readonly name: string) {
+	constructor(
+		public readonly name: string,
+		private readonly url = `ws://${name}`
+	) {
 		void this.connect();
 	}
 
@@ -73,7 +76,7 @@ export class Host {
 			return;
 		}
 		this._state = HostState.Connecting;
-		const socket = new WebSocket(`ws://${this.name}`);
+		const socket = new WebSocket(this.url);
 		socket.binaryType = 'arraybuffer';
 		this._socket = socket;
 		socket.onopen = () => {
