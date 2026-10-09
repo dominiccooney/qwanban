@@ -1,5 +1,7 @@
 ## Running qwanban
 
+For dynamic GCE workers, see [Control Tower](control-tower/README.md): a Rust job controller and Svelte dashboard with Friendzone registration, observatory relays, result packets and restart-safe cleanup. Standalone Observatory remains available below.
+
 Install qbt from this repository (the crates.io package named `qbt` is an
 unrelated qBittorrent client):
 

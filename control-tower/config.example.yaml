@@ -1,0 +1,42 @@
+# Paths are relative to this file. Copy outside the checkout for deployment.
+operator_addr: 127.0.0.1:8090
+worker_addr: 10.0.0.2:8091
+worker_url: http://10.0.0.2:8091
+data_dir: ./data
+ui_dir: ../observatory/build
+
+cloud:
+  api_url: https://compute.googleapis.com/compute/v1
+  project: your-project
+  # Production: the controller host's service account. Never attach it to workers.
+  auth:
+    kind: metadata
+    url: http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
+    # Local development alternative:
+    # kind: command
+    # program: gcloud
+    # args: [auth, print-access-token, --quiet]
+
+friendzone_url: http://127.0.0.1:8081
+images:
+  windows:
+    source_image: projects/your-project/global/images/your-windows-image
+    zone: us-central1-a
+    machine_type: n2-standard-4
+    subnetwork: projects/your-project/regions/us-central1/subnetworks/workers
+    disk_gb: 80
+    observatory_port: 5678
+    network_tags: [control-tower-worker]
+    metadata: {}
+
+limits:
+  max_jobs: 8
+  max_finished_jobs: 500
+  max_artifact_bytes: 1073741824
+  artifact_budget_bytes: 10737418240
+  upload_timeout_secs: 300
+  request_timeout_secs: 15
+  job_timeout_secs: 7200
+  reconcile_secs: 5
+  max_relays: 32
+  max_relay_message_bytes: 16777216
