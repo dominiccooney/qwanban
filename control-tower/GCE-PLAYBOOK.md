@@ -10,7 +10,7 @@ Use these public, pinned source revisions:
 
 | Repository | Revision | What it provides |
 | --- | --- | --- |
-| `dominiccooney/qwanban`, branch `main` | `a5641645cfdd4db654110b338af820ab8646f456` | Control Tower, official GCE SDK/ADC, worker profiles, callback derivation, ledger recovery; qbt observatory protocol |
+| `dominiccooney/qwanban`, branch `main` | `b1c070d93531f3874337124851793380bb632471` | Control Tower, official GCE SDK/ADC, worker profiles, callback derivation, ledger recovery; qbt observatory protocol |
 | `dominiccooney/friendzone`, branch `master` | `ce63da16c001d9cfb15df843b5379c3199ef8807` | Atomic IP ownership transfer, instance-local metadata protection, unattended Windows CA setup |
 
 Control Tower is included on qwanban `main`. Clones below need no GitHub credentials; check out the pinned application revisions rather than relying on moving branch heads. The playbook itself may be newer than the pinned application revision.
@@ -170,9 +170,9 @@ mkdir -p "$HOME/control-tower-build"
 cd "$HOME/control-tower-build"
 git clone --branch main https://github.com/dominiccooney/qwanban.git
 git clone https://github.com/dominiccooney/friendzone.git
-git -C qwanban checkout --detach a5641645cfdd4db654110b338af820ab8646f456
+git -C qwanban checkout --detach b1c070d93531f3874337124851793380bb632471
 git -C friendzone checkout --detach ce63da16c001d9cfb15df843b5379c3199ef8807
-test "$(git -C qwanban rev-parse HEAD)" = a5641645cfdd4db654110b338af820ab8646f456
+test "$(git -C qwanban rev-parse HEAD)" = b1c070d93531f3874337124851793380bb632471
 test "$(git -C friendzone rev-parse HEAD)" = ce63da16c001d9cfb15df843b5379c3199ef8807
 
 export NO_PROXY='*'
