@@ -135,7 +135,7 @@ async fn list(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
     let config = app.config.read().await.clone();
     let ledger = app.changed.borrow().clone();
     Json(
-        json!({"jobs":ledger.jobs.values().collect::<Vec<_>>(),"images":config.images.keys().collect::<Vec<_>>(),"reload_error":*app.reload_error.read().await}),
+        json!({"jobs":ledger.jobs.values().collect::<Vec<_>>(),"worker_profiles":config.worker_profiles.keys().collect::<Vec<_>>(),"reload_error":*app.reload_error.read().await}),
     )
 }
 async fn submit(
@@ -346,7 +346,7 @@ async fn relay(
     require(count < limits.max_relays, "relay limit reached")?;
     let address = SocketAddr::new(
         job.ip.context("worker has no IP")?,
-        job.snapshot.image.observatory_port,
+        job.snapshot.worker_profile.observatory_port,
     );
     let duration = Duration::from_secs(job.snapshot.request_timeout_secs);
     let mut websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();

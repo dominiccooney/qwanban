@@ -44,13 +44,15 @@ impl Store {
             .context("another Control Tower owns this data directory")?;
         fs::create_dir_all(root.join("artifacts"))?;
         let ledger_path = root.join("jobs.json");
-        let ledger: Ledger = if ledger_path.exists() {
-            serde_json::from_slice(&fs::read(ledger_path)?)?
+        let (ledger, migrated): (Ledger, bool) = if ledger_path.exists() {
+            let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&ledger_path)?)?;
+            let migrated = migrate(&mut value)?;
+            (serde_json::from_value(value)?, migrated)
         } else {
-            Ledger::default()
+            (Ledger::default(), false)
         };
         ensure!(
-            ledger.version == 1,
+            ledger.version == 2,
             "unsupported ledger version {}",
             ledger.version
         );
@@ -85,11 +87,16 @@ impl Store {
                 fs::remove_file(entry.path())?;
             }
         }
-        Ok(Self {
+        let mut store = Self {
             root,
             ledger,
             _lock: lock,
-        })
+        };
+        if migrated {
+            store.commit(store.ledger.clone())?;
+            eprintln!("migrated job ledger to version 2; GCE authentication now uses host ADC");
+        }
+        Ok(store)
     }
 
     pub fn commit(&mut self, next: Ledger) -> Result<()> {
@@ -144,4 +151,84 @@ impl Store {
         }
         Ok(total)
     }
+}
+
+/// Version 1 stored image-profile names and a bespoke token source. Preserve
+/// every job/resource identity and callback URL; credentials now come from ADC.
+fn migrate(value: &mut serde_json::Value) -> Result<bool> {
+    use serde_json::Value;
+    match value["version"].as_u64() {
+        Some(2) => return Ok(false),
+        Some(1) => {}
+        version => anyhow::bail!("unsupported ledger version {version:?}"),
+    }
+    let jobs = value["jobs"]
+        .as_object_mut()
+        .context("invalid ledger jobs")?;
+    for job in jobs.values_mut() {
+        let job = job.as_object_mut().context("invalid legacy job")?;
+        for (section, old, new) in [
+            ("submission", "image", "worker_profile"),
+            ("snapshot", "image", "worker_profile"),
+        ] {
+            let section = job
+                .get_mut(section)
+                .context("missing legacy job section")?
+                .as_object_mut()
+                .context("invalid legacy job section")?;
+            ensure!(!section.contains_key(new), "mixed ledger versions");
+            let old_value = section
+                .remove(old)
+                .context("legacy job has no image profile")?;
+            section.insert(new.into(), old_value);
+        }
+        let cloud = job
+            .get_mut("snapshot")
+            .and_then(|snapshot| snapshot.get_mut("cloud"))
+            .context("missing legacy cloud snapshot")?
+            .as_object_mut()
+            .context("invalid legacy cloud snapshot")?;
+        let api_url = cloud
+            .remove("api_url")
+            .context("legacy snapshot has no API URL")?;
+        let url = api_url.as_str().context("invalid legacy API URL")?;
+        let mut endpoint = crate::config::http_url(url)?;
+        ensure!(
+            matches!(endpoint.path().trim_end_matches('/'), "" | "/compute/v1"),
+            "legacy GCE endpoint has an unsupported path; ledger not migrated"
+        );
+        endpoint.set_path("");
+        ensure!(
+            !cloud.contains_key("endpoint"),
+            "mixed cloud snapshot versions"
+        );
+        cloud.insert(
+            "endpoint".into(),
+            Value::String(endpoint.as_str().trim_end_matches('/').into()),
+        );
+        let auth = cloud
+            .remove("auth")
+            .context("legacy snapshot has no auth configuration")?;
+        let auth = auth
+            .as_object()
+            .context("invalid legacy auth configuration")?;
+        match auth.get("kind").and_then(Value::as_str) {
+            Some("metadata") => ensure!(
+                auth.len() == 2 && auth.get("url").is_some_and(Value::is_string),
+                "invalid legacy metadata auth"
+            ),
+            Some("command") => ensure!(
+                auth.len() == 3
+                    && auth.get("program").is_some_and(Value::is_string)
+                    && auth
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .is_some_and(|args| args.iter().all(Value::is_string)),
+                "invalid legacy command auth"
+            ),
+            _ => anyhow::bail!("unknown legacy auth configuration"),
+        }
+    }
+    value["version"] = Value::from(2);
+    Ok(true)
 }

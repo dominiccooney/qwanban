@@ -1,4 +1,4 @@
-use crate::config::{Cloud, Image};
+use crate::config::{Cloud, WorkerProfile};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,7 +17,7 @@ pub fn now() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct Submission {
     pub id: Uuid,
-    pub image: String,
+    pub worker_profile: String,
     pub title: String,
     pub source: String,
     pub prompt: String,
@@ -28,7 +28,7 @@ pub struct Submission {
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub cloud: Cloud,
-    pub image: Image,
+    pub worker_profile: WorkerProfile,
     pub friendzone_url: String,
     pub worker_url: String,
     pub request_timeout_secs: u64,
@@ -94,7 +94,7 @@ impl Job {
         matches!(self.phase, Phase::Running) && self.outcome.is_none()
     }
     pub fn metadata(&self) -> BTreeMap<String, String> {
-        let mut items = self.snapshot.image.metadata.clone();
+        let mut items = self.snapshot.worker_profile.metadata.clone();
         items.insert(
             "control-tower-job-id".into(),
             self.submission.id.to_string(),
@@ -126,7 +126,7 @@ pub struct Ledger {
 impl Default for Ledger {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             jobs: BTreeMap::new(),
             retired_ids: BTreeSet::new(),
         }

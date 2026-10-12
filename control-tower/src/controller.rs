@@ -1,10 +1,11 @@
 use crate::{
-    cloud::{self, Api, InstanceStatus},
+    cloud::{self, Clients},
     config::{Config, validate_metadata},
     model::{Artifact, Job, Ledger, Outcome, Phase, Snapshot, Submission, now},
     storage::Store,
 };
 use anyhow::{Context, Result, ensure};
+use google_cloud_compute_v1::model::{Instance, instance::Status as InstanceStatus};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, Notify, RwLock, watch};
 use uuid::Uuid;
@@ -17,10 +18,14 @@ pub struct App {
     pub uploads: std::sync::Mutex<HashMap<Uuid, u64>>,
     pub relay_count: std::sync::atomic::AtomicUsize,
     pub reload_error: RwLock<Option<String>>,
+    cloud: Mutex<Clients>,
 }
 
 impl App {
-    pub fn open(config: Config) -> Result<Arc<Self>> {
+    pub fn open(
+        config: Config,
+        credentials: google_cloud_auth::credentials::Credentials,
+    ) -> Result<Arc<Self>> {
         config.validate()?;
         let store = Store::open(&config.data_dir)?;
         let (changed, _) = watch::channel(Arc::new(store.ledger.clone()));
@@ -32,6 +37,7 @@ impl App {
             uploads: Default::default(),
             relay_count: Default::default(),
             reload_error: RwLock::new(None),
+            cloud: Mutex::new(Clients::new(credentials)),
         }))
     }
     pub fn publish(&self, store: &Store) {
@@ -67,19 +73,19 @@ impl App {
             store.ledger.jobs.values().filter(|j| j.active()).count() < config.limits.max_jobs,
             "active job limit reached"
         );
-        let image = config
-            .images
-            .get(&submission.image)
-            .context("unknown image profile")?
+        let worker_profile = config
+            .worker_profiles
+            .get(&submission.worker_profile)
+            .context("unknown worker profile")?
             .clone();
         let job = Job {
             name: format!("ct-{}", submission.id.simple()),
             submission,
             snapshot: Snapshot {
                 cloud: config.cloud.clone(),
-                image,
+                worker_profile,
                 friendzone_url: config.friendzone_url.clone(),
-                worker_url: config.worker_url.clone(),
+                worker_url: config.worker_url(),
                 request_timeout_secs: config.limits.request_timeout_secs,
                 job_timeout_secs: config.limits.job_timeout_secs,
             },
@@ -183,7 +189,7 @@ impl App {
                     begin_cleanup(&mut job);
                 }
             }
-            let result = advance(&mut job).await;
+            let result = advance(&mut job, &mut *self.cloud.lock().await).await;
             match result {
                 Ok(()) => job.last_error = None,
                 Err(error) => {
@@ -259,6 +265,7 @@ impl App {
             next.jobs.remove(&id);
             next.retired_ids.insert(id);
         }
+        self.cloud.lock().await.retain(next.jobs.values());
         store.commit(next)?;
         self.publish(&store);
         Ok(())
@@ -317,34 +324,66 @@ fn begin_cleanup(job: &mut Job) {
     };
 }
 
-fn owned(job: &Job, instance: &cloud::Instance) -> Result<()> {
+fn owned(job: &Job, instance: &Instance) -> Result<()> {
     ensure!(
         instance.labels.get("control-tower-job") == Some(&job.submission.id.simple().to_string()),
         "VM name belongs to another job; refusing adoption"
     );
-    ensure!(
-        !instance.id.is_empty() && instance.id.bytes().all(|c| c.is_ascii_digit()),
-        "invalid instance ID"
-    );
+    ensure!(instance.id.is_some_and(|id| id > 0), "invalid instance ID");
     ensure!(
         instance.network_interfaces.len() == 1
-            && instance.network_interfaces[0].access_configs.is_empty(),
+            && instance.network_interfaces[0].access_configs.is_empty()
+            && instance.network_interfaces[0]
+                .ipv_6_access_configs
+                .is_empty(),
         "worker must have one private-only NIC"
     );
+    ensure!(
+        instance.service_accounts.is_empty() && instance.can_ip_forward != Some(true),
+        "worker must have no service account or IP forwarding"
+    );
+    match instance
+        .status
+        .as_ref()
+        .context("GCE instance has no status")?
+    {
+        InstanceStatus::Deprovisioning
+        | InstanceStatus::Pending
+        | InstanceStatus::PendingStop
+        | InstanceStatus::Provisioning
+        | InstanceStatus::Repairing
+        | InstanceStatus::Running
+        | InstanceStatus::Staging
+        | InstanceStatus::Stopped
+        | InstanceStatus::Stopping
+        | InstanceStatus::Suspended
+        | InstanceStatus::Suspending
+        | InstanceStatus::Terminated => {}
+        status => anyhow::bail!("unsupported GCE instance status: {status:?}"),
+    }
     Ok(())
 }
 
-async fn advance(job: &mut Job) -> Result<()> {
+fn instance_ip(instance: &Instance) -> Result<Option<std::net::IpAddr>> {
+    instance.network_interfaces[0]
+        .network_ip
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .context("invalid worker IP")
+}
+
+async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
     match job.phase.clone() {
         // Persist the insertion intent in its own pass before any GCE request.
         // Cancellation of a queued job therefore never creates a VM.
         Phase::Queued => job.phase = Phase::Provisioning { operation: None },
         Phase::Provisioning { operation } => {
-            let api = Api::new(job).await?;
+            let api = clients.for_job(job).await?;
             if let Some(ref operation) = operation
                 && let Some(op) = api.operation(operation).await?
             {
-                match op.done() {
+                match cloud::operation_done(&op) {
                     Ok(false) => return Ok(()),
                     Err(e) => {
                         job.outcome.get_or_insert(Outcome::Failed);
@@ -357,19 +396,23 @@ async fn advance(job: &mut Job) -> Result<()> {
             if let Some(instance) = api.get(&job.name).await? {
                 owned(job, &instance)?;
                 ensure!(
-                    job.instance_id.as_ref().is_none_or(|id| id == &instance.id),
+                    job.instance_id
+                        .as_ref()
+                        .is_none_or(|id| instance.id.is_some_and(|value| id == &value.to_string())),
                     "VM incarnation changed; refusing adoption"
                 );
-                job.instance_id = Some(instance.id);
-                job.ip = instance.network_interfaces[0].network_ip;
+                job.instance_id = Some(instance.id.context("GCE instance has no ID")?.to_string());
+                job.ip = instance_ip(&instance)?;
                 if job.outcome.is_some() {
                     begin_cleanup(job);
                     return Ok(());
                 }
-                if dead(&instance.status) {
+                if dead(instance.status.as_ref().unwrap()) {
                     job.outcome = Some(Outcome::Lost);
                     begin_cleanup(job);
-                } else if matches!(instance.status, InstanceStatus::Running) && job.ip.is_some() {
+                } else if matches!(instance.status, Some(InstanceStatus::Running))
+                    && job.ip.is_some()
+                {
                     job.phase = Phase::Registering;
                 }
             } else if operation.is_some() || job.instance_id.is_some() {
@@ -380,17 +423,17 @@ async fn advance(job: &mut Job) -> Result<()> {
                 // uncertain earlier request before attempting cleanup.
                 let op = api.insert(job).await?;
                 job.phase = Phase::Provisioning {
-                    operation: Some(op.name),
+                    operation: Some(cloud::operation_name(&op)?),
                 };
             } else {
                 let op = api.insert(job).await?;
                 job.phase = Phase::Provisioning {
-                    operation: Some(op.name),
+                    operation: Some(cloud::operation_name(&op)?),
                 };
             }
         }
         Phase::Registering => {
-            let api = Api::new(job).await?;
+            let api = clients.for_job(job).await?;
             let instance = api
                 .get(
                     job.instance_id
@@ -404,7 +447,7 @@ async fn advance(job: &mut Job) -> Result<()> {
                 return Ok(());
             };
             owned(job, &instance)?;
-            if instance.network_interfaces[0].network_ip != job.ip || dead(&instance.status) {
+            if instance_ip(&instance)? != job.ip || dead(instance.status.as_ref().unwrap()) {
                 job.outcome = Some(Outcome::Lost);
                 begin_cleanup(job);
                 return Ok(());
@@ -413,7 +456,7 @@ async fn advance(job: &mut Job) -> Result<()> {
             job.phase = Phase::Running;
         }
         Phase::Running => {
-            let api = Api::new(job).await?;
+            let api = clients.for_job(job).await?;
             let instance = api
                 .get(
                     job.instance_id
@@ -425,11 +468,8 @@ async fn advance(job: &mut Job) -> Result<()> {
                 None => true,
                 Some(instance) => {
                     owned(job, &instance)?;
-                    ensure!(
-                        instance.network_interfaces[0].network_ip == job.ip,
-                        "worker IP changed"
-                    );
-                    dead(&instance.status)
+                    ensure!(instance_ip(&instance)? == job.ip, "worker IP changed");
+                    dead(instance.status.as_ref().unwrap())
                 }
             };
             if dead {
@@ -452,18 +492,19 @@ async fn advance(job: &mut Job) -> Result<()> {
             }
             if delete {
                 let result = async {
-                    let api = Api::new(job).await?;
+                    let api = clients.for_job(job).await?;
                     if job.instance_id.is_none() {
                         if let Some(instance) = api.get(&job.name).await? {
                             owned(job, &instance)?;
-                            job.instance_id = Some(instance.id);
+                            job.instance_id =
+                                Some(instance.id.context("GCE instance has no ID")?.to_string());
                         } else {
                             return Ok(true);
                         }
                     }
                     if let Some(name) = &operation {
                         if let Some(op) = api.operation(name).await? {
-                            match op.done() {
+                            match cloud::operation_done(&op) {
                                 Ok(false) => return Ok(false),
                                 Err(error) => {
                                     operation = None;
@@ -483,8 +524,8 @@ async fn advance(job: &mut Job) -> Result<()> {
                     match api.delete(job).await? {
                         None => Ok(true),
                         Some(op) => {
-                            let done = op.done()?;
-                            operation = Some(op.name);
+                            let done = cloud::operation_done(&op)?;
+                            operation = Some(cloud::operation_name(&op)?);
                             Ok(done)
                         }
                     }

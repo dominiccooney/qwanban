@@ -1,10 +1,16 @@
-use crate::{config::Auth, model::Job};
+use crate::model::Job;
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
-use serde::Deserialize;
-use serde_json::{Value, json};
-use std::time::Duration;
+use google_cloud_auth::credentials::Credentials;
+use google_cloud_compute_v1::{
+    client::{Instances, ZoneOperations},
+    model::{self, Instance, Operation},
+};
+use google_cloud_gax::retry_policy::NeverRetry;
+use serde_json::json;
+use std::{collections::HashMap, time::Duration};
 
+// Friendzone and the operator CLI use direct HTTP; GCE uses the official SDK.
 pub fn client(seconds: u64) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .no_proxy()
@@ -27,221 +33,227 @@ pub async fn response_bytes(response: reqwest::Response, limit: usize) -> Result
     Ok(bytes)
 }
 
-pub struct Api {
-    client: reqwest::Client,
-    token: String,
-    base: String,
+/// ADC and its token cache belong to the process. Reuse SDK connection pools
+/// for jobs with the same endpoint and request timeout.
+pub struct Clients {
+    credentials: Credentials,
+    cache: HashMap<(String, u64), (Instances, ZoneOperations)>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum InstanceStatus {
-    Deprovisioning,
-    Pending,
-    PendingStop,
-    Provisioning,
-    Repairing,
-    Running,
-    Staging,
-    Stopped,
-    Stopping,
-    Suspended,
-    Suspending,
-    Terminated,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Instance {
-    pub id: String,
-    pub status: InstanceStatus,
-    #[serde(default)]
-    pub labels: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    pub network_interfaces: Vec<Nic>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Nic {
-    #[serde(rename = "networkIP")]
-    pub network_ip: Option<std::net::IpAddr>,
-    #[serde(default)]
-    pub access_configs: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum OperationStatus {
-    Pending,
-    Running,
-    Done,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Operation {
-    pub name: String,
-    pub status: OperationStatus,
-    pub error: Option<Value>,
-}
-
-impl Operation {
-    pub fn done(&self) -> Result<bool> {
-        if matches!(self.status, OperationStatus::Done) {
-            if let Some(error) = &self.error {
-                bail!("GCE operation failed: {error}");
-            }
-            return Ok(true);
+impl Clients {
+    pub fn new(credentials: Credentials) -> Self {
+        Self {
+            credentials,
+            cache: HashMap::new(),
         }
-        Ok(false)
+    }
+
+    pub fn retain<'a>(&mut self, jobs: impl Iterator<Item = &'a Job>) {
+        let live: std::collections::HashSet<_> = jobs
+            .filter(|job| job.active())
+            .map(|job| {
+                (
+                    &job.snapshot.cloud.endpoint,
+                    job.snapshot.request_timeout_secs,
+                )
+            })
+            .collect();
+        self.cache
+            .retain(|(endpoint, timeout), _| live.contains(&(endpoint, *timeout)));
+    }
+
+    pub async fn for_job(&mut self, job: &Job) -> Result<Api> {
+        let key = (
+            job.snapshot.cloud.endpoint.clone(),
+            job.snapshot.request_timeout_secs,
+        );
+        if !self.cache.contains_key(&key) {
+            let timeout = Duration::from_secs(key.1);
+            // The ledger owns retries and polling. A timeout must return control
+            // rather than hide another RPC or wait for a cloud operation to finish.
+            let (instances, operations) = tokio::time::timeout(timeout, async {
+                let instances = Instances::builder()
+                    .with_endpoint(&key.0)
+                    .with_credentials(self.credentials.clone())
+                    .with_retry_policy(NeverRetry)
+                    .with_attempt_timeout(timeout)
+                    .build()
+                    .await?;
+                let operations = ZoneOperations::builder()
+                    .with_endpoint(&key.0)
+                    .with_credentials(self.credentials.clone())
+                    .with_retry_policy(NeverRetry)
+                    .with_attempt_timeout(timeout)
+                    .build()
+                    .await?;
+                Ok::<_, anyhow::Error>((instances, operations))
+            })
+            .await
+            .context("GCE client initialization timed out")??;
+            self.cache.insert(key.clone(), (instances, operations));
+        }
+        let (instances, operations) = self.cache[&key].clone();
+        Ok(Api {
+            instances,
+            operations,
+            project: job.snapshot.cloud.project.clone(),
+            zone: job.snapshot.worker_profile.zone.clone(),
+            timeout: Duration::from_secs(key.1),
+        })
+    }
+}
+
+pub struct Api {
+    instances: Instances,
+    operations: ZoneOperations,
+    project: String,
+    zone: String,
+    timeout: Duration,
+}
+
+async fn optional<T>(
+    timeout: Duration,
+    request: impl std::future::Future<Output = google_cloud_compute_v1::Result<T>>,
+) -> Result<Option<T>> {
+    match tokio::time::timeout(timeout, request)
+        .await
+        .context("GCE request timed out")?
+    {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.http_status_code() == Some(404) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn operation_name(operation: &Operation) -> Result<String> {
+    let name = operation
+        .name
+        .as_deref()
+        .context("GCE operation has no name")?;
+    ensure!(
+        !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'),
+        "invalid GCE operation name"
+    );
+    Ok(name.to_owned())
+}
+
+fn operation_status(operation: &Operation) -> Result<&model::operation::Status> {
+    let status = operation
+        .status
+        .as_ref()
+        .context("GCE operation has no status")?;
+    match status {
+        model::operation::Status::Pending
+        | model::operation::Status::Running
+        | model::operation::Status::Done => Ok(status),
+        status => bail!("unsupported GCE operation status: {status:?}"),
+    }
+}
+
+pub fn operation_done(operation: &Operation) -> Result<bool> {
+    match operation_status(operation)? {
+        model::operation::Status::Pending | model::operation::Status::Running => Ok(false),
+        model::operation::Status::Done => {
+            if let Some(error) = &operation.error {
+                bail!("GCE operation failed: {}", serde_json::to_string(error)?);
+            }
+            ensure!(
+                operation.http_error_status_code.is_none(),
+                "GCE operation failed: {:?}: {:?}",
+                operation.http_error_status_code,
+                operation.http_error_message
+            );
+            Ok(true)
+        }
+        status => bail!("unsupported GCE operation status: {status:?}"),
     }
 }
 
 impl Api {
-    pub async fn new(job: &Job) -> Result<Self> {
-        let client = client(job.snapshot.request_timeout_secs)?;
-        let timeout = Duration::from_secs(job.snapshot.request_timeout_secs);
-        let token = match &job.snapshot.cloud.auth {
-            Auth::Metadata { url } => {
-                let response = client
-                    .get(url)
-                    .header("Metadata-Flavor", "Google")
-                    .send()
-                    .await?;
-                ensure!(
-                    response.status().is_success(),
-                    "metadata token request: {}",
-                    response.status()
-                );
-                #[derive(Deserialize)]
-                struct Token {
-                    access_token: String,
-                }
-                serde_json::from_slice::<Token>(&response_bytes(response, 65536).await?)?
-                    .access_token
-            }
-            Auth::Command { program, args } => {
-                let output = tokio::time::timeout(
-                    timeout,
-                    tokio::process::Command::new(program)
-                        .args(args)
-                        .stdin(std::process::Stdio::null())
-                        .kill_on_drop(true)
-                        .output(),
-                )
-                .await??;
-                ensure!(
-                    output.status.success(),
-                    "token command exited {}",
-                    output.status
-                );
-                ensure!(
-                    output.stdout.len() <= 65536,
-                    "token command output too large"
-                );
-                String::from_utf8(output.stdout)?.trim().to_owned()
-            }
-        };
-        ensure!(!token.is_empty(), "empty cloud access token");
-        let base = format!(
-            "{}/projects/{}/zones/{}",
-            job.snapshot.cloud.api_url.trim_end_matches('/'),
-            job.snapshot.cloud.project,
-            job.snapshot.image.zone
-        );
-        Ok(Self {
-            client,
-            token,
-            base,
-        })
-    }
-
-    async fn send<T: serde::de::DeserializeOwned>(
-        &self,
-        method: reqwest::Method,
-        path: &str,
-        body: Option<Value>,
-        request_id: Option<uuid::Uuid>,
-    ) -> Result<Option<T>> {
-        let mut request = self
-            .client
-            .request(method, format!("{}{path}", self.base))
-            .bearer_auth(&self.token);
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        if let Some(id) = request_id {
-            request = request.query(&[("requestId", id.to_string())]);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let bytes = response_bytes(response, 2 * 1024 * 1024).await?;
-        ensure!(
-            status.is_success(),
-            "GCE {path}: {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        Ok(Some(
-            serde_json::from_slice(&bytes).context("decode GCE response")?,
-        ))
-    }
-
     pub async fn get(&self, identity: &str) -> Result<Option<Instance>> {
         ensure!(
             crate::config::valid_name(identity)
                 || !identity.is_empty() && identity.bytes().all(|c| c.is_ascii_digit()),
             "invalid instance identity"
         );
-        self.send(
-            reqwest::Method::GET,
-            &format!("/instances/{identity}"),
-            None,
-            None,
+        optional(
+            self.timeout,
+            self.instances
+                .get()
+                .set_project(&self.project)
+                .set_zone(&self.zone)
+                .set_instance(identity)
+                .send(),
         )
         .await
     }
+
     pub async fn operation(&self, name: &str) -> Result<Option<Operation>> {
         ensure!(
-            name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'),
+            !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'),
             "invalid GCE operation name"
         );
-        self.send(
-            reqwest::Method::GET,
-            &format!("/operations/{name}"),
-            None,
-            None,
+        let operation = optional(
+            self.timeout,
+            self.operations
+                .get()
+                .set_project(&self.project)
+                .set_zone(&self.zone)
+                .set_operation(name)
+                .send(),
         )
-        .await
+        .await?;
+        if let Some(operation) = &operation {
+            operation_status(operation)?;
+        }
+        Ok(operation)
     }
+
     pub async fn insert(&self, job: &Job) -> Result<Operation> {
-        let image = &job.snapshot.image;
-        let items: Vec<Value> = job
+        let profile = &job.snapshot.worker_profile;
+        let items = job
             .metadata()
             .into_iter()
-            .map(|(key, value)| json!({"key":key,"value":value}))
-            .collect();
-        let body = json!({
-            "name":job.name,
-            "machineType":format!("zones/{}/machineTypes/{}",image.zone,image.machine_type),
-            "disks":[{"boot":true,"autoDelete":true,"type":"PERSISTENT","initializeParams":{"sourceImage":image.source_image,"diskSizeGb":image.disk_gb.to_string()}}],
-            "networkInterfaces":[{"subnetwork":image.subnetwork,"accessConfigs":[],"stackType":"IPV4_ONLY"}],
-            "serviceAccounts":[],"canIpForward":false,
-            "labels":{"control-tower-job":job.submission.id.simple().to_string()},
-            "metadata":{"items":items},"tags":{"items":image.network_tags},
-            "scheduling":{"automaticRestart":false}
-        });
-        self.send(
-            reqwest::Method::POST,
-            "/instances",
-            Some(body),
-            Some(job.submission.id),
+            .map(|(key, value)| model::metadata::Items::new().set_key(key).set_value(value));
+        let body = Instance::new()
+            .set_name(&job.name)
+            .set_machine_type(format!(
+                "zones/{}/machineTypes/{}",
+                profile.zone, profile.machine_type
+            ))
+            .set_disks([model::AttachedDisk::new()
+                .set_boot(true)
+                .set_auto_delete(true)
+                .set_type(model::attached_disk::Type::Persistent)
+                .set_initialize_params(
+                    model::AttachedDiskInitializeParams::new()
+                        .set_source_image(&profile.source_image)
+                        .set_disk_size_gb(i64::from(profile.disk_gb)),
+                )])
+            .set_network_interfaces([model::NetworkInterface::new()
+                .set_subnetwork(&profile.subnetwork)
+                .set_stack_type(model::network_interface::StackType::Ipv4Only)])
+            .set_can_ip_forward(false)
+            .set_labels([("control-tower-job", job.submission.id.simple().to_string())])
+            .set_metadata(model::Metadata::new().set_items(items))
+            .set_tags(model::Tags::new().set_items(profile.network_tags.clone()))
+            .set_scheduling(model::Scheduling::new().set_automatic_restart(false));
+        // Empty service_accounts/access_configs are omitted by the SDK serializer.
+        // GCE's REST contract gives omitted arrays the same no-account/no-NAT meaning.
+        optional(
+            self.timeout,
+            self.instances
+                .insert()
+                .set_project(&self.project)
+                .set_zone(&self.zone)
+                .set_request_id(job.submission.id.to_string())
+                .set_body(body)
+                .send(),
         )
         .await?
         .context("GCE insert returned 404")
     }
+
     pub async fn delete(&self, job: &Job) -> Result<Option<Operation>> {
         let identity = job
             .instance_id
@@ -252,11 +264,14 @@ impl Api {
             "invalid GCE instance ID"
         );
         // Numeric instance IDs address an incarnation, not a reusable VM name.
-        self.send(
-            reqwest::Method::DELETE,
-            &format!("/instances/{identity}"),
-            None,
-            None,
+        optional(
+            self.timeout,
+            self.instances
+                .delete()
+                .set_project(&self.project)
+                .set_zone(&self.zone)
+                .set_instance(identity)
+                .send(),
         )
         .await
     }

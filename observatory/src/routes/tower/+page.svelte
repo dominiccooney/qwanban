@@ -8,7 +8,7 @@
 	interface Job {
 		submission: {
 			id: string;
-			image: string;
+			worker_profile: string;
 			title: string;
 			source: string;
 			prompt: string;
@@ -24,11 +24,11 @@
 		artifact: { bytes: number } | null;
 	}
 	let jobs: Job[] = $state([]);
-	let images: string[] = $state([]);
+	let workerProfiles: string[] = $state([]);
 	let reloadError: string | null = $state(null);
 	let error = $state('');
 	let pollError = $state('');
-	let image = $state('');
+	let workerProfile = $state('');
 	let title = $state('');
 	let prompt = $state('');
 	let setupScript = $state('');
@@ -69,14 +69,14 @@
 	async function refreshOnce(): Promise<void> {
 		const data = (await request('/api/jobs')) as {
 			jobs: Job[];
-			images: string[];
+			worker_profiles: string[];
 			reload_error: string | null;
 		};
 		if (disposed) return;
 		jobs = data.jobs.sort((a, b) => b.created_at - a.created_at);
-		images = data.images;
+		workerProfiles = data.worker_profiles;
 		reloadError = data.reload_error;
-		if (!image && images.length) image = images[0];
+		if (!workerProfile && workerProfiles.length) workerProfile = workerProfiles[0];
 		const running = new Set(
 			jobs.filter((job) => job.phase.kind === 'running').map((job) => job.submission.id)
 		);
@@ -122,7 +122,13 @@
 	async function submit(): Promise<void> {
 		submitting = true;
 		try {
-			const fields = { image, title, prompt, setup_script: setupScript, source: 'operator' };
+			const fields = {
+				worker_profile: workerProfile,
+				title,
+				prompt,
+				setup_script: setupScript,
+				source: 'operator'
+			};
 			const body = JSON.stringify(fields);
 			if (body !== submittedBody) {
 				submissionId = crypto.randomUUID();
@@ -179,8 +185,8 @@
 				}}
 			>
 				<label
-					>Image<select bind:value={image}
-						>{#each images as name (name)}<option>{name}</option>{/each}</select
+					>Worker profile<select bind:value={workerProfile}
+						>{#each workerProfiles as name (name)}<option>{name}</option>{/each}</select
 					></label
 				>
 				<label>Title<input bind:value={title} required maxlength="512" /></label>
@@ -189,7 +195,7 @@
 					>Setup script<textarea bind:value={setupScript} rows="4" spellcheck="false"
 					></textarea></label
 				>
-				<button disabled={submitting || !image || (!prompt && !setupScript)}
+				<button disabled={submitting || !workerProfile || (!prompt && !setupScript)}
 					>{submitting ? 'Submitting…' : 'Launch job'}</button
 				>
 			</form>
@@ -204,7 +210,7 @@
 						>
 					</div>
 					<p class="meta">
-						{job.submission.image} · {job.submission.source} · {new Date(
+						{job.submission.worker_profile} · {job.submission.source} · {new Date(
 							job.created_at * 1000
 						).toLocaleString()}
 					</p>
@@ -240,7 +246,7 @@
 			<details class="history">
 				<summary
 					><strong>{job.submission.title}</strong><span
-						>{job.outcome} · {job.submission.image} · {new Date(
+						>{job.outcome} · {job.submission.worker_profile} · {new Date(
 							job.created_at * 1000
 						).toLocaleString()}</span
 					></summary

@@ -8,33 +8,24 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub operator_addr: SocketAddr,
     pub worker_addr: SocketAddr,
-    pub worker_url: String,
     pub data_dir: PathBuf,
     pub ui_dir: PathBuf,
     pub cloud: Cloud,
     pub friendzone_url: String,
-    pub images: BTreeMap<String, Image>,
+    pub worker_profiles: BTreeMap<String, WorkerProfile>,
     pub limits: Limits,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Cloud {
-    pub api_url: String,
+    pub endpoint: String,
     pub project: String,
-    pub auth: Auth,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Auth {
-    Metadata { url: String },
-    Command { program: PathBuf, args: Vec<String> },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Image {
+pub struct WorkerProfile {
     pub source_image: String,
     pub zone: String,
     pub machine_type: String,
@@ -103,12 +94,6 @@ impl Config {
                 *dir = parent.join(&*dir);
             }
         }
-        if let Auth::Command { program, .. } = &mut config.cloud.auth
-            && program.is_relative()
-            && program.components().count() > 1
-        {
-            *program = parent.join(&*program);
-        }
         config.validate()?;
         Ok(config)
     }
@@ -130,15 +115,6 @@ impl Config {
             !self.worker_addr.ip().is_unspecified(),
             "worker_addr must name a specific interface, not a wildcard"
         );
-        let worker = http_url(&self.worker_url)?;
-        ensure!(
-            worker.path() == "/",
-            "worker_url must be an origin without a path"
-        );
-        ensure!(
-            worker.port_or_known_default() == Some(self.worker_addr.port()),
-            "worker_url must use worker_addr's port"
-        );
         let friendzone = http_url(&self.friendzone_url)?;
         ensure!(
             friendzone.path() == "/",
@@ -151,41 +127,40 @@ impl Config {
                 .is_some_and(|ip| ip.is_loopback()),
             "friendzone_url must use a literal loopback address"
         );
-        http_url(&self.cloud.api_url)?;
+        let endpoint = http_url(&self.cloud.endpoint)?;
+        ensure!(
+            endpoint.path() == "/",
+            "cloud.endpoint must be an origin; the SDK supplies /compute/v1"
+        );
         ensure!(
             valid_name(&self.cloud.project)
                 || self.cloud.project.bytes().all(|c| c.is_ascii_digit())
                     && !self.cloud.project.is_empty(),
             "invalid project"
         );
-        match &self.cloud.auth {
-            Auth::Metadata { url } => {
-                http_url(url)?;
-            }
-            Auth::Command { program, .. } => {
-                ensure!(!program.as_os_str().is_empty(), "empty token command")
-            }
-        }
-        ensure!(!self.images.is_empty(), "at least one image is required");
-        for (name, image) in &self.images {
+        ensure!(
+            !self.worker_profiles.is_empty(),
+            "at least one worker profile is required"
+        );
+        for (name, profile) in &self.worker_profiles {
             ensure!(
-                valid_name(name) && valid_name(&image.zone) && valid_name(&image.machine_type),
-                "invalid image profile, zone or machine type: {name}"
+                valid_name(name) && valid_name(&profile.zone) && valid_name(&profile.machine_type),
+                "invalid worker profile, zone or machine type: {name}"
             );
             ensure!(
-                image.disk_gb > 0 && image.observatory_port > 0,
+                profile.disk_gb > 0 && profile.observatory_port > 0,
                 "disk size and observatory port must be nonzero"
             );
             ensure!(
-                image.source_image.starts_with("projects/")
-                    && image.subnetwork.starts_with("projects/"),
+                profile.source_image.starts_with("projects/")
+                    && profile.subnetwork.starts_with("projects/"),
                 "use project-qualified image and subnetwork paths"
             );
             ensure!(
-                image.network_tags.iter().all(|tag| valid_name(tag)),
+                profile.network_tags.iter().all(|tag| valid_name(tag)),
                 "invalid network tag"
             );
-            for (key, value) in &image.metadata {
+            for (key, value) in &profile.metadata {
                 ensure!(
                     !key.starts_with("control-tower-"),
                     "control-tower-* metadata is reserved"
@@ -225,6 +200,10 @@ impl Config {
             && self.worker_addr == next.worker_addr
             && self.data_dir == next.data_dir
             && self.ui_dir == next.ui_dir
+    }
+
+    pub fn worker_url(&self) -> String {
+        format!("http://{}", self.worker_addr)
     }
 }
 
