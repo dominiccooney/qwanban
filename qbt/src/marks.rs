@@ -53,7 +53,7 @@ impl MarkSelector {
     fn resolve(&self, count: usize) -> anyhow::Result<Vec<usize>> {
         let mut numbers = match self {
             MarkSelector::Numbers(numbers) => numbers.clone(),
-            MarkSelector::Text(text) => parse_selector_text(text)?,
+            MarkSelector::Text(text) => parse_selector_text(text, count)?,
         };
         anyhow::ensure!(!numbers.is_empty(), "marks selector is empty");
         numbers.sort_unstable();
@@ -68,20 +68,30 @@ impl MarkSelector {
     }
 }
 
-/// Accepts a single number, "a-b", or a comma list of those.
-fn parse_selector_text(text: &str) -> anyhow::Result<Vec<usize>> {
+/// Accepts a single number, a range "a-b", an open range "a-" (to the last
+/// mark) or "-b" (from the first), or a comma list of those.
+fn parse_selector_text(text: &str, count: usize) -> anyhow::Result<Vec<usize>> {
     let text = text.trim();
     let mut numbers = Vec::new();
     for part in text.split(',') {
         let part = part.trim();
         let invalid = || {
             anyhow::anyhow!(
-                "invalid marks selector {text:?}; use e.g. [1,3], \"2-5\", or omit for all"
+                "invalid marks selector {text:?}; use e.g. [1,3], \"2-5\", \"3-\", or omit for all"
             )
         };
         if let Some((start, end)) = part.split_once('-') {
-            let start: usize = start.trim().parse().map_err(|_| invalid())?;
-            let end: usize = end.trim().parse().map_err(|_| invalid())?;
+            let (start, end) = (start.trim(), end.trim());
+            let start: usize = if start.is_empty() {
+                1
+            } else {
+                start.parse().map_err(|_| invalid())?
+            };
+            let end: usize = if end.is_empty() {
+                count
+            } else {
+                end.parse().map_err(|_| invalid())?
+            };
             anyhow::ensure!(start <= end, "invalid marks range {part:?}");
             numbers.extend(start..=end);
         } else {
@@ -390,6 +400,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "mark 9 does not exist; there are 3 pending marks");
+        assert_eq!(
+            resolve(Some(&MarkSelector::Text("3-".into())), 5).unwrap(),
+            vec![3, 4, 5]
+        );
+        assert_eq!(
+            resolve(Some(&MarkSelector::Text("-2".into())), 5).unwrap(),
+            vec![1, 2]
+        );
+        assert!(resolve(Some(&MarkSelector::Text("3-".into())), 2).is_err());
         assert!(resolve(Some(&MarkSelector::Text("x".into())), 3).is_err());
         assert!(resolve(Some(&MarkSelector::Text("5-2".into())), 9).is_err());
         assert!(resolve(Some(&MarkSelector::Numbers(vec![])), 3).is_err());

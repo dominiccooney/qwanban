@@ -72,7 +72,8 @@ sent on their own:
 Marks are numbered 1..n in the order they were taken; the order comes from
 file names, so it survives a backend restart. `marks` is optional on
 `flipbook` and `clear_marks` and accepts a JSON array of numbers, a string
-such as `"2-5"` or `"1,3-4"`, or `"all"`; omitted means all pending marks.
+such as `"2-5"`, `"3-"` (to the last mark), `"-3"` (from the first), or
+`"1,3-4"`, or `"all"`; omitted means all pending marks.
 `flipbook` writes `flipbooks/<name>/<name>.webp`, moves the frames it used
 to `flipbooks/<name>/frames/` beside a `frames.json` of labels, and leaves
 unselected marks pending. Each frame is shown at half size with its number
