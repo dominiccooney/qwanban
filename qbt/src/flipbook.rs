@@ -7,6 +7,13 @@ use webp_animation::{Encoder, EncoderOptions, EncodingConfig};
 
 const WEBP_QUALITY: f32 = 75.0;
 const RANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The final frame stays up this long before the animation loops, so a
+/// reader has time to take in the end state.
+pub(crate) const LAST_FRAME_HOLD_MS: i32 = 3500;
+/// Captioned frames are shrunk to this fraction of the screen so the file
+/// stays small enough to drop into a pull request comment.
+const CAPTIONED_FRAME_SCALE: f32 = 0.5;
+const CAPTION_FONT: &[u8] = include_bytes!("../assets/NotoSans-Regular.ttf");
 
 pub(crate) async fn create(
     observatory: &str,
@@ -91,7 +98,12 @@ pub(crate) async fn create(
     })
     .await
     .map_err(|_| anyhow::anyhow!("timed out waiting for screenshot range"))??;
-    encode(&pngs, out, fps)
+    let data = encode(&pngs, fps, None)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out, &data)?;
+    Ok(())
 }
 
 fn screenshot_sequence(id: &str) -> anyhow::Result<u64> {
@@ -110,13 +122,33 @@ fn frame_timestamp(frame_index: usize, fps: f64) -> anyhow::Result<i32> {
     Ok(timestamp as i32)
 }
 
-fn encode(pngs: &[Vec<u8>], out: &Path, fps: f64) -> anyhow::Result<()> {
+/// Encodes PNG frames into one animated WebP and returns its bytes. With
+/// `captions` (one per frame) each frame is shrunk to
+/// `CAPTIONED_FRAME_SCALE` and its caption is drawn along the bottom. Frames
+/// are decoded one at a time, so the count is bounded by disk, not memory.
+pub(crate) fn encode(
+    pngs: &[Vec<u8>],
+    fps: f64,
+    captions: Option<&[String]>,
+) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(!pngs.is_empty(), "screenshot range is empty");
+    if let Some(captions) = captions {
+        anyhow::ensure!(
+            captions.len() == pngs.len(),
+            "expected one caption per frame"
+        );
+    }
+    let scale = if captions.is_some() {
+        CAPTIONED_FRAME_SCALE
+    } else {
+        1.0
+    };
     let dimensions = pngs
         .iter()
         .map(|png| {
             image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png)
                 .into_dimensions()
+                .map(|(width, height)| scaled_dimensions(width, height, scale))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let canvas_dimensions =
@@ -131,25 +163,106 @@ fn encode(pngs: &[Vec<u8>], out: &Path, fps: f64) -> anyhow::Result<()> {
     };
     let mut encoder = Encoder::new_with_options(canvas_dimensions, options)?;
     for (index, png) in pngs.iter().enumerate() {
-        let frame = image::load_from_memory_with_format(png, image::ImageFormat::Png)?.to_rgba8();
-        if frame.dimensions() == canvas_dimensions {
-            encoder.add_frame(frame.as_raw(), frame_timestamp(index, fps)?)?;
-        } else {
+        let mut frame =
+            image::load_from_memory_with_format(png, image::ImageFormat::Png)?.to_rgba8();
+        if scale != 1.0 {
+            let (width, height) = dimensions[index];
+            frame = image::imageops::resize(
+                &frame,
+                width,
+                height,
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        if frame.dimensions() != canvas_dimensions {
             let mut canvas = image::RgbaImage::from_pixel(
                 canvas_dimensions.0,
                 canvas_dimensions.1,
                 image::Rgba([0, 0, 0, 255]),
             );
             image::imageops::overlay(&mut canvas, &frame, 0, 0);
-            encoder.add_frame(canvas.as_raw(), frame_timestamp(index, fps)?)?;
+            frame = canvas;
+        }
+        if let Some(captions) = captions {
+            caption(&mut frame, index + 1, pngs.len(), &captions[index]);
+        }
+        encoder.add_frame(frame.as_raw(), frame_timestamp(index, fps)?)?;
+    }
+    let end = frame_timestamp(pngs.len() - 1, fps)?
+        .checked_add(LAST_FRAME_HOLD_MS)
+        .ok_or_else(|| anyhow::anyhow!("flipbook duration is too long"))?;
+    Ok(encoder.finalize(end)?.to_vec())
+}
+
+fn scaled_dimensions(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
+}
+
+/// Draws "N/T label" in a translucent band along the bottom of the frame.
+/// Labels wider than the band are cut with an ellipsis.
+fn caption(frame: &mut image::RgbaImage, index: usize, total: usize, label: &str) {
+    use ab_glyph::{Font, FontRef, ScaleFont};
+
+    let (width, height) = frame.dimensions();
+    let band_height = ((height as f32) * 0.11).round().clamp(14.0, 96.0) as u32;
+    let band_height = band_height.min(height);
+    let band_top = height - band_height;
+    for y in band_top..height {
+        for x in 0..width {
+            let pixel = frame.get_pixel_mut(x, y);
+            for channel in &mut pixel.0[..3] {
+                *channel = (*channel as f32 * 0.3) as u8;
+            }
         }
     }
-    let data = encoder.finalize(frame_timestamp(pngs.len(), fps)?)?;
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+
+    let font = FontRef::try_from_slice(CAPTION_FONT).expect("bundled caption font is valid");
+    let scaled = font.as_scaled(band_height as f32 * 0.6);
+    let padding = band_height as f32 * 0.3;
+    let baseline = band_top as f32 + padding + scaled.ascent();
+    let text = format!("{index}/{total}  {label}");
+    let advance = |c: char| scaled.h_advance(font.glyph_id(c));
+    let ellipsis_width = advance('…');
+    let max_width = width as f32 - 2.0 * padding;
+    let mut fitted = String::new();
+    let mut text_width = 0.0;
+    let mut truncated = false;
+    for c in text.chars() {
+        let next = text_width + advance(c);
+        if next + ellipsis_width > max_width {
+            truncated = true;
+            break;
+        }
+        fitted.push(c);
+        text_width = next;
     }
-    std::fs::write(out, &*data)?;
-    Ok(())
+    if truncated {
+        fitted.push('…');
+    }
+
+    let mut x = padding;
+    for c in fitted.chars() {
+        let glyph_id = font.glyph_id(c);
+        let glyph = glyph_id.with_scale_and_position(scaled.scale(), ab_glyph::point(x, baseline));
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            outline.draw(|px, py, coverage| {
+                let x = bounds.min.x as i64 + px as i64;
+                let y = bounds.min.y as i64 + py as i64;
+                if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
+                    return;
+                }
+                let pixel = frame.get_pixel_mut(x as u32, y as u32);
+                for channel in &mut pixel.0[..3] {
+                    *channel = (*channel as f32 + (255.0 - *channel as f32) * coverage) as u8;
+                }
+            });
+        }
+        x += scaled.h_advance(glyph_id);
+    }
 }
 
 #[cfg(test)]
@@ -175,18 +288,15 @@ mod tests {
 
     #[test]
     fn encodes_an_animated_lossy_webp() {
-        let out = std::env::temp_dir().join(format!("qbt-flipbook-{}.webp", std::process::id()));
-        encode(
+        let bytes = encode(
             &[png(Rgba([255, 0, 0, 255])), png(Rgba([0, 0, 255, 255]))],
-            &out,
             2.0,
+            None,
         )
         .unwrap();
-        let bytes = std::fs::read(&out).unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
         assert!(bytes.windows(4).any(|window| window == b"ANIM"));
         assert!(bytes.windows(4).any(|window| window == b"ANMF"));
-        std::fs::remove_file(out).unwrap();
     }
 
     #[test]
@@ -198,27 +308,72 @@ mod tests {
         assert_eq!(frame_timestamp(2, 600.0).unwrap(), 3);
     }
 
+    fn frame_timestamps(bytes: &[u8]) -> Vec<i32> {
+        webp_animation::Decoder::new(bytes)
+            .unwrap()
+            .into_iter()
+            .map(|frame| frame.timestamp())
+            .collect()
+    }
+
+    #[test]
+    fn holds_the_last_frame_before_looping() {
+        let frames = [
+            png(Rgba([255, 0, 0, 255])),
+            png(Rgba([0, 255, 0, 255])),
+            png(Rgba([0, 0, 255, 255])),
+        ];
+        let bytes = encode(&frames, 1.0, None).unwrap();
+        // Decoded timestamps are each frame's end time.
+        assert_eq!(
+            frame_timestamps(&bytes),
+            vec![1000, 2000, 2000 + LAST_FRAME_HOLD_MS]
+        );
+    }
+
+    #[test]
+    fn captioned_frames_are_downscaled_and_carry_a_band() {
+        let frames = [
+            png_with_dimensions(200, 100, Rgba([255, 255, 255, 255])),
+            png_with_dimensions(200, 100, Rgba([255, 255, 255, 255])),
+        ];
+        let captions = ["Open the editor".to_owned(), "x".repeat(500)];
+        let bytes = encode(&frames, 1.0, Some(&captions)).unwrap();
+        let decoder = webp_animation::Decoder::new(&bytes).unwrap();
+        assert_eq!(decoder.dimensions(), (100, 50));
+        let frame = decoder.into_iter().next().unwrap();
+        let (width, height) = frame.dimensions();
+        let pixel = |x: u32, y: u32| &frame.data()[((y * width + x) * 4) as usize..][..3];
+        assert_eq!(pixel(width / 2, 2), [255, 255, 255], "top stays white");
+        assert!(
+            pixel(width - 2, height - 2)[0] < 128,
+            "caption band darkens the bottom"
+        );
+    }
+
+    #[test]
+    fn caption_count_must_match_frames() {
+        let error = encode(&[png(Rgba([0, 0, 0, 255]))], 1.0, Some(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("one caption per frame"));
+    }
+
     #[test]
     fn pads_changing_desktop_sizes_one_frame_at_a_time() {
-        let out = std::env::temp_dir().join(format!(
-            "qbt-flipbook-changing-size-{}.webp",
-            std::process::id()
-        ));
-        encode(
+        let bytes = encode(
             &[
                 png_with_dimensions(2, 1, Rgba([255, 0, 0, 255])),
                 png_with_dimensions(1, 2, Rgba([0, 0, 255, 255])),
             ],
-            &out,
             2.0,
+            None,
         )
         .unwrap();
-        let bytes = std::fs::read(&out).unwrap();
         assert_eq!(
             webp_animation::Decoder::new(&bytes).unwrap().dimensions(),
             (2, 2)
         );
-        std::fs::remove_file(out).unwrap();
     }
 
     #[tokio::test]

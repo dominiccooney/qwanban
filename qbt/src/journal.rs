@@ -109,6 +109,16 @@ impl Journal {
         )
     }
 
+    /// The most recently captured screenshot still in the buffer: what the
+    /// agent is looking at now.
+    pub(crate) fn latest_screenshot(&self) -> Option<(String, Arc<Vec<u8>>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .screenshots
+            .back()
+            .map(|(id, png)| (id.clone(), png.clone()))
+    }
+
     pub(crate) fn screenshot(&self, id: &str) -> Option<Arc<Vec<u8>>> {
         let state = self.state.lock().unwrap();
         state

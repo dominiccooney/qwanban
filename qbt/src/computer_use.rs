@@ -3,6 +3,7 @@
 
 use crate::artifacts::ArtifactStore;
 use crate::journal::Journal;
+use crate::marks;
 use crate::pal::MouseButton;
 use crate::pal::{CapturedScreenshot, ForegroundWindow, ScreenshotImage};
 use crate::{input, pal};
@@ -134,6 +135,27 @@ pub(crate) enum ComputerUseRequest {
         text: String,
     },
 
+    /// Keeps the most recent screenshot on disk under a short label. Allowed
+    /// inside `run_sequence`, so a step can be marked without a round trip.
+    Mark {
+        id: usize,
+        label: String,
+    },
+    ListMarks {
+        id: usize,
+    },
+    /// Encodes pending marks (all, or `marks` selected) into a captioned
+    /// animated WebP and moves their PNGs beside it.
+    Flipbook {
+        id: usize,
+        name: String,
+        marks: Option<marks::MarkSelector>,
+    },
+    ClearMarks {
+        id: usize,
+        marks: Option<marks::MarkSelector>,
+    },
+
     /// The agent publishes one of its own events (transcript message,
     /// coordinator status change, ...) into the journal for the observatory.
     /// `kind` namespaces the event (e.g. "transcript.message"); `payload` is
@@ -175,6 +197,10 @@ impl ComputerUseRequest {
             ComputerUseRequest::SaveScreenshot { id, .. } => *id,
             ComputerUseRequest::GetClipboard { id } => *id,
             ComputerUseRequest::SetClipboard { id, .. } => *id,
+            ComputerUseRequest::Mark { id, .. } => *id,
+            ComputerUseRequest::ListMarks { id } => *id,
+            ComputerUseRequest::Flipbook { id, .. } => *id,
+            ComputerUseRequest::ClearMarks { id, .. } => *id,
             ComputerUseRequest::PublishEvent { id, .. } => *id,
             ComputerUseRequest::ShutdownBackend { id } => *id,
         }
@@ -619,6 +645,17 @@ async fn run_sequence(
                     error: "shutdown_backend is not allowed inside run_sequence".into(),
                 };
             }
+            // Their answer is text the caller needs; a sequence returns only
+            // the final screenshot.
+            Ok(ComputerUseRequest::ListMarks { .. })
+            | Ok(ComputerUseRequest::Flipbook { .. })
+            | Ok(ComputerUseRequest::ClearMarks { .. }) => {
+                return ComputerUseResponse::Error {
+                    id,
+                    ok: false,
+                    error: "list_marks, flipbook, and clear_marks are not allowed inside run_sequence; only mark is".into(),
+                };
+            }
             Ok(step) => step,
             Err(err) => {
                 journal.append(
@@ -765,6 +802,84 @@ async fn handle_request(
             let text = text.clone();
             tokio::task::spawn_blocking(move || pal::set_clipboard(text)).await??;
             Ok((ComputerUseResponse::Empty { id: *id, ok: true }, None))
+        }
+        ComputerUseRequest::Mark { id, label } => {
+            let (screenshot_id, png) = journal.latest_screenshot().ok_or_else(|| {
+                anyhow::anyhow!("no screenshot to mark yet; take a screenshot, then mark it")
+            })?;
+            let mark = marks::mark(artifacts, &screenshot_id, &png, label)?;
+            Ok((
+                ComputerUseResponse::Text {
+                    id: *id,
+                    ok: true,
+                    text: format!(
+                        "Marked {}: {}\n{}",
+                        mark.number,
+                        mark.label,
+                        mark.png.display()
+                    ),
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::ListMarks { id } => {
+            let marks = marks::list(artifacts)?;
+            let text = if marks.is_empty() {
+                "No pending marks.".to_owned()
+            } else {
+                let mut lines = vec![format!("{} pending marks:", marks.len())];
+                lines.extend(marks.iter().map(|mark| {
+                    format!("{}. {}\n   {}", mark.number, mark.label, mark.png.display())
+                }));
+                lines.join("\n")
+            };
+            Ok((
+                ComputerUseResponse::Text {
+                    id: *id,
+                    ok: true,
+                    text,
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::Flipbook { id, name, marks } => {
+            let book = marks::flipbook(artifacts, name, marks.as_ref())?;
+            let mut lines = vec![
+                format!(
+                    "Wrote {} ({} frames, {} fps)",
+                    book.webp.display(),
+                    book.frames.len(),
+                    marks::FLIPBOOK_FPS
+                ),
+                "Frames:".to_owned(),
+            ];
+            lines.extend(book.frames.iter().map(|frame| {
+                format!(
+                    "{}. {}\n   {}",
+                    frame.index,
+                    frame.label,
+                    frame.path.display()
+                )
+            }));
+            Ok((
+                ComputerUseResponse::Text {
+                    id: *id,
+                    ok: true,
+                    text: lines.join("\n"),
+                },
+                None,
+            ))
+        }
+        ComputerUseRequest::ClearMarks { id, marks } => {
+            let cleared = marks::clear(artifacts, marks.as_ref())?;
+            Ok((
+                ComputerUseResponse::Text {
+                    id: *id,
+                    ok: true,
+                    text: format!("Cleared {cleared} pending marks."),
+                },
+                None,
+            ))
         }
         ComputerUseRequest::CursorPosition { id } => {
             let (x, y) = pal::cursor_position()?;
@@ -1076,8 +1191,13 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     fn test_artifacts() -> Arc<ArtifactStore> {
-        let root =
-            std::env::temp_dir().join(format!("qbt-computer-use-tests-{}", std::process::id(),));
+        // Unique per call: tests run in parallel and each removes its root.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qbt-computer-use-tests-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
         Arc::new(ArtifactStore::new(root).unwrap())
     }
 
@@ -1334,6 +1454,124 @@ mod tests {
             std::fs::read(&saved_path).unwrap(),
             **journal.screenshot(screenshot_id).unwrap(),
         );
+        shutdown.cancel();
+        std::fs::remove_dir_all(artifacts.root()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn marks_the_latest_screenshot_and_builds_a_flipbook_over_the_socket() {
+        let (addr, _journal, artifacts, shutdown) =
+            start_test_server_with_capacity(DEFAULT_MAX_SCREENSHOTS).await;
+        let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
+
+        let too_early = send(
+            &mut client,
+            serde_json::json!({ "id": 1, "action": "mark", "label": "nothing yet" }),
+        )
+        .await;
+        assert_eq!(too_early["ok"], false);
+        assert!(
+            too_early["error"]
+                .as_str()
+                .unwrap()
+                .contains("take a screenshot")
+        );
+
+        send(
+            &mut client,
+            serde_json::json!({ "id": 2, "action": "screenshot" }),
+        )
+        .await;
+        let marked = send(
+            &mut client,
+            serde_json::json!({ "id": 3, "action": "mark", "label": "First look" }),
+        )
+        .await;
+        assert_eq!(marked["ok"], true);
+        let text = marked["text"].as_str().unwrap();
+        assert!(text.starts_with("Marked 1: First look\n"), "{text}");
+        let png = PathBuf::from(text.lines().nth(1).unwrap());
+        assert!(png.starts_with(artifacts.root()) && png.exists());
+
+        // A mark inside a sequence applies to the screenshot the previous
+        // step produced.
+        let sequence = send(
+            &mut client,
+            serde_json::json!({
+                "id": 4,
+                "action": "run_sequence",
+                "actions": [
+                    { "action": "brief_pause" },
+                    { "action": "mark", "label": "After pause" },
+                ],
+            }),
+        )
+        .await;
+        assert_eq!(sequence["ok"], true, "{sequence}");
+
+        let listed = send(
+            &mut client,
+            serde_json::json!({ "id": 5, "action": "list_marks" }),
+        )
+        .await;
+        let text = listed["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("2 pending marks:\n1. First look\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n2. After pause\n"), "{text}");
+
+        let rejected = send(
+            &mut client,
+            serde_json::json!({
+                "id": 6,
+                "action": "run_sequence",
+                "actions": [{ "action": "flipbook", "name": "nested" }],
+            }),
+        )
+        .await;
+        assert_eq!(rejected["ok"], false);
+
+        let book = send(
+            &mut client,
+            serde_json::json!({ "id": 7, "action": "flipbook", "name": "Socket Run", "marks": [2] }),
+        )
+        .await;
+        assert_eq!(book["ok"], true, "{book}");
+        let text = book["text"].as_str().unwrap();
+        let webp = PathBuf::from(
+            text.lines()
+                .next()
+                .unwrap()
+                .strip_prefix("Wrote ")
+                .unwrap()
+                .split(" (")
+                .next()
+                .unwrap(),
+        );
+        assert_eq!(
+            webp,
+            artifacts
+                .root()
+                .join("flipbooks/socket-run/socket-run.webp")
+        );
+        assert_eq!(&std::fs::read(&webp).unwrap()[..4], b"RIFF");
+        assert!(text.contains("1 frames, 1 fps"), "{text}");
+        assert!(text.contains("\n1. After pause\n"), "{text}");
+
+        let cleared = send(
+            &mut client,
+            serde_json::json!({ "id": 8, "action": "clear_marks" }),
+        )
+        .await;
+        assert_eq!(cleared["text"], "Cleared 1 pending marks.");
+        let listed = send(
+            &mut client,
+            serde_json::json!({ "id": 9, "action": "list_marks" }),
+        )
+        .await;
+        assert_eq!(listed["text"], "No pending marks.");
+
         shutdown.cancel();
         std::fs::remove_dir_all(artifacts.root()).unwrap();
     }

@@ -55,8 +55,35 @@ Text clipboard actions use the native Windows, X11, or macOS clipboard:
 `get_clipboard` returns `text` as a string or `null`; `set_clipboard` returns
 the normal empty success response.
 
-Create an animated WebP from an inclusive retained range through the
-observatory WebSocket (default `ws://127.0.0.1:5678`):
+Marks keep chosen screenshots on disk so an agent can show a sequence of key
+moments later. `mark` saves the most recent screenshot (full resolution, plus
+a JSON sidecar) under `marks/pending/` in the artifact root and answers with
+its path. It is allowed inside `run_sequence`, so a step can be marked in
+the same round trip. The other mark actions answer with text and must be
+sent on their own:
+
+```jsonc
+{ "id": 10, "action": "mark", "label": "Editor open with the file loaded" }
+{ "id": 11, "action": "list_marks" }
+{ "id": 12, "action": "flipbook", "name": "load-file", "marks": "1-3" }
+{ "id": 13, "action": "clear_marks", "marks": [2, 4] }
+```
+
+Marks are numbered 1..n in the order they were taken; the order comes from
+file names, so it survives a backend restart. `marks` is optional on
+`flipbook` and `clear_marks` and accepts a JSON array of numbers, a string
+such as `"2-5"` or `"1,3-4"`, or `"all"`; omitted means all pending marks.
+`flipbook` writes `flipbooks/<name>/<name>.webp`, moves the frames it used
+to `flipbooks/<name>/frames/` beside a `frames.json` of labels, and leaves
+unselected marks pending. Each frame is shown at half size with its number
+and label drawn along the bottom; frames advance at 1 fps and the last one
+holds for 3.5 s before the loop restarts. A reused name gets a numeric
+suffix rather than overwriting.
+
+The `flipbook` CLI subcommand below is the uncaptioned, full-size
+equivalent for journal screenshot ranges. It creates an animated WebP from
+an inclusive retained range through the observatory WebSocket (default
+`ws://127.0.0.1:5678`):
 
 ```powershell
 cargo run -- flipbook --from shot_10 --to shot_20 --out runs/interaction.webp --fps 2

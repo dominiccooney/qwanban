@@ -19,7 +19,8 @@ impl ArtifactStore {
         })
     }
 
-    pub(crate) fn save(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    /// Checks a caller-supplied path and returns it relative to the root.
+    fn relative(&self, path: &Path) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             !path
                 .components()
@@ -37,16 +38,67 @@ impl ArtifactStore {
             !relative.as_os_str().is_empty() && relative.file_name().is_some(),
             "artifact path must name a file"
         );
+        Ok(relative)
+    }
+
+    fn create_parent(&self, relative: &Path) -> anyhow::Result<()> {
         if let Some(parent) = relative
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             self.directory.create_dir_all(parent)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn save(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+        let relative = self.relative(path)?;
+        self.create_parent(&relative)?;
         // All resolution and the write are relative to the held directory
         // capability, so a concurrent symlink swap cannot escape the root.
         self.directory.write(&relative, bytes)?;
         Ok(self.root.join(relative))
+    }
+
+    pub(crate) fn read(&self, path: &Path) -> anyhow::Result<Vec<u8>> {
+        Ok(self.directory.read(self.relative(path)?)?)
+    }
+
+    pub(crate) fn remove(&self, path: &Path) -> anyhow::Result<()> {
+        Ok(self.directory.remove_file(self.relative(path)?)?)
+    }
+
+    /// Moves a file within the root, creating the destination's parents.
+    pub(crate) fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<PathBuf> {
+        let to = self.relative(to)?;
+        self.create_parent(&to)?;
+        self.directory
+            .rename(self.relative(from)?, &self.directory, &to)?;
+        Ok(self.root.join(to))
+    }
+
+    /// Lists the file names directly under a directory, sorted. A missing
+    /// directory lists as empty.
+    pub(crate) fn list_files(&self, directory: &Path) -> anyhow::Result<Vec<String>> {
+        let relative = self.relative(directory)?;
+        let entries = match self.directory.read_dir(&relative) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub(crate) fn exists(&self, path: &Path) -> anyhow::Result<bool> {
+        Ok(self.directory.exists(self.relative(path)?))
     }
 
     pub(crate) fn root(&self) -> &Path {

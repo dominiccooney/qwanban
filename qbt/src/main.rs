@@ -9,6 +9,7 @@ mod computer_use;
 mod flipbook;
 mod input;
 mod journal;
+mod marks;
 mod observed;
 mod pal;
 
