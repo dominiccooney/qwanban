@@ -14,11 +14,18 @@ bun run build:tower
 cd ..
 ```
 
-Copy `control-tower/config.example.yaml` to your deployment directory and edit every deployment value: listener addresses/ports, worker URL, project, zone, image, machine type, subnet, Friendzone URL and UI/data paths. Point `ui_dir` at the built `observatory/build` directory. Paths resolve relative to the YAML file, not the working directory. Keep configuration and data inaccessible to workers. On Windows, set private filesystem ACLs yourself; Unix data directories/files use owner-only permissions.
+Copy `control-tower/config.example.yaml` to your deployment directory and edit the listener addresses/ports, project, worker profiles, Friendzone URL and UI/data paths. A worker profile selects the image, zone, machine type, subnet, disk size, network tags and extra metadata. Point `ui_dir` at the built `observatory/build` directory. Paths resolve relative to the YAML file, not the working directory. Keep configuration and data inaccessible to workers. On Windows, set private filesystem ACLs yourself; Unix data directories/files use owner-only permissions.
+
+`worker_addr` is **Control Tower's** worker-facing interface, not a VM address. Control Tower derives `http://<worker_addr>` for callback metadata, so the bind and advertised port cannot disagree. Use an interface IP reachable directly from workers; hostname advertisements and reverse proxies are unsupported.
+
+GCE uses Google's official Rust client and Application Default Credentials (ADC). On GCE, use the controller host's service account; never attach it to workers. For local development, run `gcloud auth application-default login` once. `GOOGLE_APPLICATION_CREDENTIALS` can select a credential file. Credential selection takes effect at server startup; the SDK caches and refreshes access tokens. `cloud.endpoint` is an origin such as `https://compute.googleapis.com`; the SDK supplies `/compute/v1`. Do not include that path in the endpoint.
 
 ```sh
+export NO_PROXY='*'
 control-tower --config /etc/control-tower/config.yaml serve
 ```
+
+In PowerShell, set `$env:NO_PROXY = '*'` before `serve`. Startup rejects a missing or narrower bypass value; the Google SDK does not expose a public per-client proxy override.
 
 Forward the configured operator port, then open `/tower` (the root redirects there):
 
@@ -30,7 +37,7 @@ Use the loopback REST API or the CLI for cron:
 
 ```sh
 control-tower --config /etc/control-tower/config.yaml submit \
-  --image windows --title "QA checkout" --source cron \
+  --worker-profile windows --title "QA checkout" --source cron \
   --prompt /srv/jobs/prompt.txt --setup-script /srv/jobs/setup.ps1
 control-tower --config /etc/control-tower/config.yaml list
 control-tower --config /etc/control-tower/config.yaml cancel JOB_UUID
@@ -51,7 +58,7 @@ The instance receives these custom metadata entries:
 | `control-tower-prompt` | UTF-8 prompt, possibly empty |
 | `control-tower-setup-script` | UTF-8 setup script, possibly empty |
 
-The Friendzone guest name is `ct-` followed by the UUID without hyphens. Configure its proxy/bootstrap URLs through image-profile metadata or the image's existing bootstrap configuration. No real credentials enter metadata. Each metadata value must fit GCE's 256 KiB limit; all keys/values together must be below 512 KiB.
+The Friendzone guest name is `ct-` followed by the UUID without hyphens. Configure its proxy/bootstrap URLs through worker-profile metadata or the image's existing bootstrap configuration. No real credentials enter metadata. Each metadata value must fit GCE's 256 KiB limit; all keys/values together must be below 512 KiB.
 
 Run qbt's agent listener on guest loopback and make its observatory port reachable **only from the controller**. Containers must use networking that preserves the VM's unique private source IP; NAT through a shared gateway is unsupported.
 
@@ -81,11 +88,13 @@ Enforce outside the guest:
 - Check that Friendzone cannot relay to Control Tower management through hostname aliases or another host service. Its existing protections are not a general resolved-DNS LAN firewall; use host firewall/process confinement where necessary.
 - Audit project-level startup scripts/metadata and guest-installed software. Do not place controller credentials in the worker image or metadata.
 
-Give only the **controller** the GCE permissions needed to create/get/delete instances, get zonal operations, create/use boot disks and read the configured images/subnetwork. Prefer a scoped custom IAM role. The `metadata` auth mode uses the controller host service account; local `command` auth mode runs the configured executable directly with arguments, no shell. All HTTP clients disable environment proxies and redirects. GCE failures/timeouts remain pending or visible errors; they do not silently remove a worker.
+Give only the **controller** the GCE permissions needed to create/get/delete instances, get zonal operations, create/use boot disks and read the configured images/subnetwork. Prefer a scoped custom IAM role. Friendzone/CLI HTTP calls disable environment proxies and redirects. Google's SDK uses its own transport and ADC; the required `NO_PROXY=*` keeps cloud/auth traffic direct. Its redirect behavior is the SDK default, so trust and protect endpoint/credential configuration. GCE failures/timeouts remain pending or visible errors; they do not silently remove a worker. SDK RPC retries and automatic operation polling are disabled: Control Tower persists operation names and retries from the ledger, with an outer deadline covering authentication and the RPC.
 
 ## Reload and recovery
 
-The service checks YAML contents each second, including atomic file replacements. Invalid YAML, unknown fields and invalid values retain the last good snapshot and show an error in the UI. Listener addresses and data/UI directories require restart; changing one rejects the entire reload. Image, endpoint and provisioning settings apply to **new submissions**; existing jobs retain their complete configuration snapshot for recovery and cleanup. Limits apply to the next request/maintenance pass; an upload/relay already admitted retains its limits.
+The service checks YAML contents each second, including atomic file replacements. Invalid YAML, unknown fields and invalid values retain the last good snapshot and show an error in the UI. Listener addresses and data/UI directories require restart; changing one rejects the entire reload. Worker profiles, endpoint and provisioning settings apply to **new submissions**; existing jobs retain their configuration snapshot for recovery and cleanup. Limits apply to the next request/maintenance pass; an upload/relay already admitted retains its limits.
+
+To upgrade the first configuration format, rename `images` to `worker_profiles`, replace `cloud.api_url` with the origin-only `cloud.endpoint`, and remove `worker_url` and `cloud.auth`. The CLI flag/API submission field are now `--worker-profile`/`worker_profile`. Version-1 ledgers migrate atomically to version 2, preserving identities, operation names, resolved profiles and existing callback URLs. Old per-job token sources are replaced by host ADC: configure equivalent permissions **before restarting**. Older binaries cannot read version 2; back up the stopped service's data directory before upgrading if rollback is needed. YAML is not rewritten automatically; old fields are rejected.
 
 Provisioning settings are persisted, so keep old cloud/Friendzone endpoints available until their jobs finish. Cloud API errors are not evidence of death. Missing or stopped instances become `lost`, enter cleanup, and leave the active list only once removal/deletion finishes. Failed Friendzone removal does not prevent VM deletion; removal continues retrying. Ctrl-C stops the service without deleting active jobs; restart with the same data directory to resume them. Ledger commit failures stop background reconciliation rather than continue with unrecorded writes.
 
@@ -94,6 +103,7 @@ The lifecycle controller is deliberately serialized. Slow cloud calls can delay 
 ## Tests
 
 ```sh
+export NO_PROXY='*'
 cargo test -p control-tower
 cd observatory
 bunx playwright install chromium
@@ -107,4 +117,4 @@ Integration tests use local HTTP/WebSocket fixtures, not your GCE project. For a
 2. Upload a packet and report completion. Verify the packet downloads intact and both the VM **and boot disk** disappear.
 3. Repeat, restarting Control Tower during provisioning and cleanup. Verify the same job resumes without creating a second VM.
 
-Live GCE/network-policy validation is a deployment requirement, not covered by local fixtures. Local checks have been run on Windows with Rust 1.96 and Node 24; the Unix permission/fsync paths still need a Linux deployment run.
+Live GCE/network-policy validation is a deployment requirement, not covered by local fixtures. Rust 1.91 or newer is required. Local checks have been run on Windows with Rust 1.96 and Node 24; the Unix permission/fsync paths still need a Linux deployment run.

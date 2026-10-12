@@ -18,7 +18,7 @@ enum Command {
     Serve,
     Submit {
         #[arg(long)]
-        image: String,
+        worker_profile: String,
         #[arg(long)]
         title: String,
         #[arg(long, default_value = "cli")]
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let base = format!("http://{}", config.operator_addr);
     let response = match cli.command {
         Command::Submit {
-            image,
+            worker_profile,
             title,
             source,
             prompt,
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
             );
             let submission = Submission {
                 id: id.unwrap_or_else(Uuid::new_v4),
-                image,
+                worker_profile,
                 title,
                 source,
                 prompt: prompt
@@ -105,9 +105,20 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(config: Config, path: PathBuf) -> Result<()> {
+    // The SDK owns its HTTP transport. Require a direct route for cloud and
+    // credential requests instead of allowing inherited proxy configuration.
+    ensure!(
+        std::env::var("NO_PROXY")
+            .or_else(|_| std::env::var("no_proxy"))
+            .is_ok_and(|value| value.trim() == "*"),
+        "set NO_PROXY=* before starting Control Tower so SDK cloud/auth requests bypass proxies"
+    );
     let operator = tokio::net::TcpListener::bind(config.operator_addr).await?;
     let worker = tokio::net::TcpListener::bind(config.worker_addr).await?;
-    let app = App::open(config)?;
+    let credentials = google_cloud_auth::credentials::Builder::default()
+        .build()
+        .context("load Application Default Credentials")?;
+    let app = App::open(config, credentials)?;
     app.retain().await?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let controller = tokio::spawn(app.clone().run(path, cancel.clone()));

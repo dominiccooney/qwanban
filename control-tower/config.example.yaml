@@ -1,24 +1,17 @@
 # Paths are relative to this file. Copy outside the checkout for deployment.
 operator_addr: 127.0.0.1:8090
 worker_addr: 10.0.0.2:8091
-worker_url: http://10.0.0.2:8091
 data_dir: ./data
 ui_dir: ../observatory/build
 
 cloud:
-  api_url: https://compute.googleapis.com/compute/v1
+  endpoint: https://compute.googleapis.com
   project: your-project
-  # Production: the controller host's service account. Never attach it to workers.
-  auth:
-    kind: metadata
-    url: http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
-    # Local development alternative:
-    # kind: command
-    # program: gcloud
-    # args: [auth, print-access-token, --quiet]
+  # Authentication uses Application Default Credentials on the controller host.
+  # Local development: gcloud auth application-default login
 
 friendzone_url: http://127.0.0.1:8081
-images:
+worker_profiles:
   windows:
     source_image: projects/your-project/global/images/your-windows-image
     zone: us-central1-a

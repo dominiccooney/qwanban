@@ -15,7 +15,10 @@ const cloud = http.createServer(async (request, response) => {
 	for await (const chunk of request) text += chunk;
 	const url = new URL(request.url, 'http://localhost');
 	response.setHeader('content-type', 'application/json');
-	if (url.pathname === '/token') return response.end(JSON.stringify({ access_token: 'fixture' }));
+	if (url.pathname === '/token')
+		return response.end(
+			JSON.stringify({ access_token: 'fixture', token_type: 'Bearer', expires_in: 3600 })
+		);
 	if (url.pathname === '/api/containers') {
 		response.statusCode = 201;
 		return response.end('{}');
@@ -23,6 +26,15 @@ const cloud = http.createServer(async (request, response) => {
 	if (url.pathname.startsWith('/api/containers/')) {
 		response.statusCode = 204;
 		return response.end();
+	}
+	if (
+		!url.pathname.startsWith('/compute/v1/') ||
+		request.headers.authorization !== 'Bearer fixture'
+	) {
+		response.statusCode = 401;
+		return response.end(
+			JSON.stringify({ error: { code: 401, message: 'expected SDK path and ADC token' } })
+		);
 	}
 	if (url.pathname.includes('/operations/'))
 		return response.end(JSON.stringify({ name: url.pathname.split('/').at(-1), status: 'DONE' }));
@@ -124,21 +136,30 @@ await new Promise((resolve) => reserve.listen(0, '127.0.0.1', resolve));
 const workerPort = reserve.address().port;
 await new Promise((resolve) => reserve.close(resolve));
 const configPath = path.join(root, 'config.yaml');
+const credentialsPath = path.join(root, 'adc.json');
+await writeFile(
+	credentialsPath,
+	JSON.stringify({
+		type: 'authorized_user',
+		client_id: 'fixture',
+		client_secret: 'fixture',
+		refresh_token: 'fixture',
+		token_uri: `http://127.0.0.1:${cloudPort}/token`
+	})
+);
 await writeFile(
 	configPath,
 	JSON.stringify({
 		operator_addr: '127.0.0.1:4180',
 		worker_addr: `127.0.0.1:${workerPort}`,
-		worker_url: `http://127.0.0.1:${workerPort}`,
 		data_dir: path.join(root, 'data'),
 		ui_dir: path.join(root, 'ui'),
 		cloud: {
-			api_url: `http://127.0.0.1:${cloudPort}`,
-			project: 'test-project',
-			auth: { kind: 'metadata', url: `http://127.0.0.1:${cloudPort}/token` }
+			endpoint: `http://127.0.0.1:${cloudPort}`,
+			project: 'test-project'
 		},
 		friendzone_url: `http://127.0.0.1:${cloudPort}`,
-		images: {
+		worker_profiles: {
 			windows: {
 				source_image: 'projects/test-project/global/images/test',
 				zone: 'test-zone',
@@ -170,7 +191,13 @@ const packagedExecutable = path.join(root, path.basename(executable));
 await cp(executable, packagedExecutable);
 const tower = spawn(packagedExecutable, ['--config', configPath, 'serve'], {
 	stdio: 'inherit',
-	cwd: root
+	cwd: root,
+	env: {
+		...process.env,
+		GOOGLE_APPLICATION_CREDENTIALS: credentialsPath,
+		NO_PROXY: '*',
+		no_proxy: '*'
+	}
 });
 let stopping = false;
 async function stop() {
