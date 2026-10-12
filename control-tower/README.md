@@ -4,6 +4,8 @@ Control Tower creates GCE computer-use workers, registers their private IPs with
 
 ## Quick start
 
+For a live GCE controller running Friendzone and Control Tower together, follow [the GCE deployment playbook](GCE-PLAYBOOK.md). It pins pushed source revisions and covers attached credentials, networking, headless services and acceptance checks.
+
 From the repository root, build the binary and static Svelte UI:
 
 ```sh
