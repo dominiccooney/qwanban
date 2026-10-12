@@ -10,10 +10,10 @@ Use these public, pinned source revisions:
 
 | Repository | Revision | What it provides |
 | --- | --- | --- |
-| `dominiccooney/qwanban`, branch `dpc/control-tower` | `a5641645cfdd4db654110b338af820ab8646f456` | Control Tower, official GCE SDK/ADC, worker profiles, callback derivation, ledger recovery; qbt observatory protocol |
+| `dominiccooney/qwanban`, branch `main` | `a5641645cfdd4db654110b338af820ab8646f456` | Control Tower, official GCE SDK/ADC, worker profiles, callback derivation, ledger recovery; qbt observatory protocol |
 | `dominiccooney/friendzone`, branch `master` | `ce63da16c001d9cfb15df843b5379c3199ef8807` | Atomic IP ownership transfer, instance-local metadata protection, unattended Windows CA setup |
 
-These revisions are pushed; Control Tower is **not on qwanban `main`**. Do not deploy qwanban's default branch by mistake. Clones below need no GitHub credentials. The playbook itself may be newer than the pinned application revision.
+Control Tower is included on qwanban `main`. Clones below need no GitHub credentials; check out the pinned application revisions rather than relying on moving branch heads. The playbook itself may be newer than the pinned application revision.
 
 Local validation: 29 Control Tower Rust tests, its packaged Rust/static-Svelte browser test, Svelte checks, Clippy, and ten focused Friendzone integration/bootstrap/contract tests passed on Windows. The fenced shell commands pass Bash/PowerShell syntax checks, and the generated Control Tower YAML parses through the real CLI. **A Linux build, systemd/nftables execution, Windows image boot, real GCE lifecycle and network-isolation checks still need the acceptance run below.** The full qbt suite did not finish locally. Passing local fixtures is not evidence that cloud permissions or firewalls work.
 
@@ -168,7 +168,7 @@ sudo tar -xJf /tmp/node-v24.21.0-linux-x64.tar.xz -C /usr/local --strip-componen
 
 mkdir -p "$HOME/control-tower-build"
 cd "$HOME/control-tower-build"
-git clone --branch dpc/control-tower https://github.com/dominiccooney/qwanban.git
+git clone --branch main https://github.com/dominiccooney/qwanban.git
 git clone https://github.com/dominiccooney/friendzone.git
 git -C qwanban checkout --detach a5641645cfdd4db654110b338af820ab8646f456
 git -C friendzone checkout --detach ce63da16c001d9cfb15df843b5379c3199ef8807
