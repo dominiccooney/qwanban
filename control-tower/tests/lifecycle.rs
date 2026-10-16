@@ -49,6 +49,13 @@ struct Fake {
     pending_insert: bool,
     operation_override: Option<Value>,
     lookup_delay: bool,
+    insert_status: Option<StatusCode>,
+    lookup_status: Option<StatusCode>,
+    delete_status: Option<StatusCode>,
+    uncertain_insert: bool,
+    operation_count: usize,
+    token_error: Option<(StatusCode, &'static str)>,
+    token_count: usize,
 }
 type FakeState = Arc<Mutex<Fake>>;
 
@@ -56,20 +63,49 @@ async fn insert(
     State(state): State<FakeState>,
     Query(query): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let mut state = state.lock().unwrap();
     state
         .request_ids
         .push(query.get("requestId").unwrap().clone());
     state.inserted.push(body.clone());
+    if let Some(status) = state.insert_status {
+        return cloud_error(status).into_response();
+    }
     if !state.insert_error {
         state.instance = Some(
             json!({"id":(123455+state.inserted.len()).to_string(),"name":body["name"],"status":"RUNNING","labels":body["labels"],"networkInterfaces":[{"networkIP":"127.0.0.1"}]}),
         );
     }
+    if state.uncertain_insert {
+        return cloud_error(StatusCode::SERVICE_UNAVAILABLE).into_response();
+    }
     Json(
         json!({"name":"insert-1","status":if state.pending_insert{"RUNNING"}else{"DONE"},"error":if state.insert_error{json!({"errors":[{"code":"QUOTA_EXCEEDED","message":"quota"}]})}else{Value::Null}}),
-    )
+    ).into_response()
+}
+fn cloud_error(status: StatusCode) -> (StatusCode, Json<Value>) {
+    let error = if status == StatusCode::FORBIDDEN {
+        json!({"code":403,"message":"Request had insufficient authentication scopes.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT","domain":"googleapis.com"}]})
+    } else {
+        json!({"code":status.as_u16(),"message":status.canonical_reason().unwrap_or("error")})
+    };
+    (status, Json(json!({"error":error})))
+}
+async fn token(State(state): State<FakeState>) -> (StatusCode, Json<Value>) {
+    let mut state = state.lock().unwrap();
+    state.token_count += 1;
+    match state.token_error {
+        Some((status, error)) => (
+            status,
+            Json(json!({"error":error,"error_description":"test token failure"})),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(json!({"access_token":"fixture","token_type":"Bearer","expires_in":3600})),
+        ),
+    }
 }
 async fn instance(
     State(state): State<FakeState>,
@@ -84,6 +120,9 @@ async fn instance(
     let mut state = state.lock().unwrap();
     if request.method() == axum::http::Method::GET {
         state.lookup_count += 1;
+        if let Some(status) = state.lookup_status {
+            return cloud_error(status).into_response();
+        }
     }
     if !state.lookup_error
         && !state
@@ -95,6 +134,9 @@ async fn instance(
     }
     if request.method() == axum::http::Method::DELETE {
         state.deleted.push(id);
+        if let Some(status) = state.delete_status {
+            return cloud_error(status).into_response();
+        }
         if !state.pending_delete {
             state.instance = None;
         }
@@ -112,7 +154,8 @@ async fn instance(
     }
 }
 async fn operation(State(state): State<FakeState>, Path(name): Path<String>) -> Json<Value> {
-    let state = state.lock().unwrap();
+    let mut state = state.lock().unwrap();
+    state.operation_count += 1;
     if let Some(operation) = &state.operation_override {
         return Json(operation.clone());
     }
@@ -155,6 +198,7 @@ impl Fixture {
         let temp = Temp::new();
         let fake = Arc::new(Mutex::new(Fake::default()));
         let router = Router::new()
+            .route("/token", post(token))
             .route(
                 "/compute/v1/projects/test-project/zones/test-zone/instances",
                 post(insert),
@@ -221,6 +265,21 @@ async fn running(app: &App) -> Uuid {
         app.changed.borrow().jobs[&id]
     );
     id
+}
+// Advance a persisted retry deadline without sleeping; all RPCs still run
+// through reconciliation and the real SDK against the wire fixture.
+async fn retry_due(app: &App, id: Uuid) {
+    let mut store = app.store.lock().await;
+    let mut next = store.ledger.clone();
+    let Phase::Retrying {
+        next_attempt_at, ..
+    } = &mut next.jobs.get_mut(&id).unwrap().phase
+    else {
+        panic!("expected retrying job");
+    };
+    *next_attempt_at = 0;
+    store.commit(next).unwrap();
+    app.publish(&store);
 }
 fn request(path: &str, method: &str, peer: &str, body: Body) -> Request<Body> {
     let mut request = Request::builder()
@@ -305,7 +364,7 @@ async fn cleanup_waits_for_gce_and_retries_friendzone_without_leaving_the_vm_run
     app.finish(id, None, Outcome::Cancelled).await.unwrap();
     app.tick().await.unwrap();
     assert!(matches!(
-        app.changed.borrow().jobs[&id].phase,
+        app.changed.borrow().jobs[&id].phase.work(),
         Phase::Cleaning {
             unregister: true,
             delete: true,
@@ -319,6 +378,7 @@ async fn cleanup_waits_for_gce_and_retries_friendzone_without_leaving_the_vm_run
         fake.instance = None;
         fake.removal_error = false;
     }
+    retry_due(&app, id).await;
     app.tick().await.unwrap();
     assert!(matches!(
         app.changed.borrow().jobs[&id].phase,
@@ -336,10 +396,11 @@ async fn registration_retries_and_cloud_outage_is_not_a_dead_worker() {
         app.tick().await.unwrap();
     }
     assert!(matches!(
-        app.changed.borrow().jobs[&id].phase,
+        app.changed.borrow().jobs[&id].phase.work(),
         Phase::Registering
     ));
     fixture.fake.lock().unwrap().registration_error = false;
+    retry_due(&app, id).await;
     app.tick().await.unwrap();
     fixture.fake.lock().unwrap().lookup_error = true;
     let lookups = fixture.fake.lock().unwrap().lookup_count;
@@ -355,10 +416,331 @@ async fn registration_retries_and_cloud_outage_is_not_a_dead_worker() {
         fake.lookup_error = false;
         fake.instance = None;
     }
+    retry_due(&app, id).await;
     app.tick().await.unwrap();
     assert_eq!(app.changed.borrow().jobs[&id].outcome, Some(Outcome::Lost));
     app.tick().await.unwrap();
     assert!(!app.changed.borrow().jobs[&id].active());
+}
+
+#[tokio::test]
+async fn insufficient_scopes_stop_launch_calls_across_restart_and_retry_resumes_the_same_job() {
+    for lookup in [true, false] {
+        let fixture = Fixture::new().await;
+        {
+            let mut fake = fixture.fake.lock().unwrap();
+            if lookup {
+                fake.lookup_status = Some(StatusCode::FORBIDDEN);
+            } else {
+                fake.insert_status = Some(StatusCode::FORBIDDEN);
+            }
+        }
+        let app = fixture.app();
+        let submission = submission();
+        let id = submission.id;
+        app.submit(submission.clone()).await.unwrap();
+        app.tick().await.unwrap();
+        app.tick().await.unwrap();
+        let job = app.changed.borrow().jobs[&id].clone();
+        assert!(matches!(job.phase, Phase::Blocked { failures: 1, .. }));
+        assert!(
+            job.last_error
+                .as_deref()
+                .unwrap()
+                .contains("insufficient authentication scopes")
+        );
+        let calls = fixture.fake.lock().unwrap().lookup_count;
+        for _ in 0..10 {
+            app.tick().await.unwrap();
+        }
+        assert_eq!(fixture.fake.lock().unwrap().lookup_count, calls);
+        drop(app);
+        let app = fixture.app();
+        app.tick().await.unwrap();
+        assert!(matches!(
+            app.changed.borrow().jobs[&id].phase,
+            Phase::Blocked { .. }
+        ));
+        assert_eq!(fixture.fake.lock().unwrap().lookup_count, calls);
+        let repeated = app.submit(submission).await.unwrap();
+        assert_eq!(repeated.submission.id, id);
+        {
+            let mut fake = fixture.fake.lock().unwrap();
+            fake.lookup_status = None;
+            fake.insert_status = None;
+        }
+        let router = control_tower::http::operator(app.clone());
+        let response = router
+            .oneshot(request(
+                &format!("/api/jobs/{id}/retry"),
+                "POST",
+                "127.0.0.1:1234",
+                Body::from("{}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(app.retry(id).await.is_err());
+        for _ in 0..3 {
+            app.tick().await.unwrap();
+        }
+        assert!(app.changed.borrow().jobs[&id].running());
+        let fake = fixture.fake.lock().unwrap();
+        assert_eq!(
+            fake.request_ids,
+            vec![id.to_string(); if lookup { 1 } else { 2 }]
+        );
+        assert_eq!(fake.registrations.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn transient_failures_back_off_and_block_after_five_attempts_even_across_restart() {
+    for status in [
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let fixture = Fixture::new().await;
+        let mut app = fixture.app();
+        fixture.fake.lock().unwrap().lookup_status = Some(status);
+        let id = app.submit(submission()).await.unwrap().submission.id;
+        app.tick().await.unwrap();
+        for failures in 1..=5 {
+            let before = control_tower::model::now();
+            app.tick().await.unwrap();
+            let phase = app.changed.borrow().jobs[&id].phase.clone();
+            if failures < 5 {
+                let Phase::Retrying {
+                    failures: count,
+                    next_attempt_at,
+                    ..
+                } = phase
+                else {
+                    panic!("{phase:?}");
+                };
+                assert_eq!(count, failures);
+                assert!(next_attempt_at >= before + (5u64 << (failures - 1)));
+                app.tick().await.unwrap();
+                assert_eq!(fixture.fake.lock().unwrap().lookup_count, failures as usize);
+                if failures == 2 {
+                    drop(app);
+                    app = fixture.app();
+                    app.tick().await.unwrap();
+                    assert_eq!(fixture.fake.lock().unwrap().lookup_count, 2);
+                }
+                retry_due(&app, id).await;
+            } else {
+                assert!(matches!(phase, Phase::Blocked { failures: 5, .. }));
+            }
+        }
+        for _ in 0..10 {
+            app.tick().await.unwrap();
+        }
+        assert_eq!(fixture.fake.lock().unwrap().lookup_count, 5);
+        fixture.fake.lock().unwrap().lookup_status = None;
+        app.retry(id).await.unwrap();
+        for _ in 0..3 {
+            app.tick().await.unwrap();
+        }
+        assert!(app.changed.borrow().jobs[&id].running());
+    }
+}
+
+#[tokio::test]
+async fn invalid_requests_and_unauthenticated_insertions_block_immediately() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::CONFLICT,
+    ] {
+        let fixture = Fixture::new().await;
+        let app = fixture.app();
+        fixture.fake.lock().unwrap().insert_status = Some(status);
+        let id = app.submit(submission()).await.unwrap().submission.id;
+        app.tick().await.unwrap();
+        app.tick().await.unwrap();
+        assert!(matches!(
+            app.changed.borrow().jobs[&id].phase,
+            Phase::Blocked { failures: 1, .. }
+        ));
+        for _ in 0..5 {
+            app.tick().await.unwrap();
+        }
+        assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn actual_sdk_credentials_classify_invalid_grant_and_transient_token_service_errors() {
+    for (status, error, transient) in [
+        (StatusCode::BAD_REQUEST, "invalid_grant", false),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            true,
+        ),
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.fake.lock().unwrap().token_error = Some((status, error));
+        let credentials=google_cloud_auth::credentials::user_account::Builder::new(json!({"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}))
+            .with_token_uri(format!("{}/token",fixture.config.cloud.endpoint))
+            .with_retry_policy(google_cloud_gax::retry_policy::NeverRetry).build().unwrap();
+        let app = App::open(fixture.config.clone(), credentials).unwrap();
+        let id = app.submit(submission()).await.unwrap().submission.id;
+        app.tick().await.unwrap();
+        app.tick().await.unwrap();
+        let job = app.changed.borrow().jobs[&id].clone();
+        if transient {
+            assert!(
+                matches!(job.phase, Phase::Retrying { failures: 1, .. }),
+                "{job:?}"
+            );
+        } else {
+            assert!(
+                matches!(job.phase, Phase::Blocked { failures: 1, .. }),
+                "{job:?}"
+            );
+        }
+        assert!(job.last_error.is_some());
+        assert_eq!(fixture.fake.lock().unwrap().token_count, 1);
+        app.tick().await.unwrap();
+        assert_eq!(fixture.fake.lock().unwrap().token_count, 1);
+        assert!(fixture.fake.lock().unwrap().inserted.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn worker_can_upload_and_complete_when_only_cloud_monitoring_is_blocked() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+    let id = running(&app).await;
+    fixture.fake.lock().unwrap().lookup_status = Some(StatusCode::FORBIDDEN);
+    app.tick().await.unwrap();
+    let response = control_tower::http::worker(app.clone())
+        .oneshot(request(
+            &format!("/jobs/{id}/artifact"),
+            "POST",
+            "127.0.0.1:1234",
+            Body::from(vec![0x28, 0xb5, 0x2f, 0xfd, 1]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    app.finish(id, Some("127.0.0.1".parse().unwrap()), Outcome::Completed)
+        .await
+        .unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&id].active());
+    assert_eq!(fixture.fake.lock().unwrap().deleted, vec!["123456"]);
+}
+
+#[tokio::test]
+async fn uncertain_insert_is_retained_when_permissions_then_block_and_cancel_deletes_the_incarnation()
+ {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+    fixture.fake.lock().unwrap().uncertain_insert = true;
+    let id = app.submit(submission()).await.unwrap().submission.id;
+    app.tick().await.unwrap();
+    app.tick().await.unwrap();
+    assert!(fixture.fake.lock().unwrap().instance.is_some());
+    fixture.fake.lock().unwrap().lookup_status = Some(StatusCode::FORBIDDEN);
+    retry_due(&app, id).await;
+    app.tick().await.unwrap();
+    assert!(matches!(
+        app.changed.borrow().jobs[&id].phase,
+        Phase::Blocked { .. }
+    ));
+    fixture.fake.lock().unwrap().lookup_status = None;
+    app.finish(id, None, Outcome::Cancelled).await.unwrap();
+    app.tick().await.unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&id].active());
+    assert_eq!(fixture.fake.lock().unwrap().deleted, vec!["123456"]);
+    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
+}
+
+#[tokio::test]
+async fn denied_cleanup_blocks_without_forgetting_vm_and_operator_retry_finishes_deletion() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+    let id = running(&app).await;
+    fixture.fake.lock().unwrap().delete_status = Some(StatusCode::FORBIDDEN);
+    app.finish(id, None, Outcome::Completed).await.unwrap();
+    app.tick().await.unwrap();
+    let job = app.changed.borrow().jobs[&id].clone();
+    assert!(matches!(job.phase, Phase::Blocked { .. }));
+    assert!(job.finished_at.is_none());
+    assert_eq!(job.instance_id.as_deref(), Some("123456"));
+    assert!(matches!(
+        job.phase.work(),
+        Phase::Cleaning {
+            unregister: false,
+            delete: true,
+            ..
+        }
+    ));
+    for _ in 0..5 {
+        app.tick().await.unwrap();
+    }
+    assert_eq!(fixture.fake.lock().unwrap().deleted.len(), 1);
+    fixture.fake.lock().unwrap().delete_status = None;
+    app.retry(id).await.unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&id].active());
+    assert_eq!(
+        fixture.fake.lock().unwrap().deleted,
+        vec!["123456", "123456"]
+    );
+    assert_eq!(fixture.fake.lock().unwrap().removed.len(), 1);
+}
+
+#[tokio::test]
+async fn blocked_running_worker_times_out_into_cleanup_and_keeps_its_identity() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+    let id = running(&app).await;
+    fixture.fake.lock().unwrap().lookup_status = Some(StatusCode::FORBIDDEN);
+    app.tick().await.unwrap();
+    {
+        let mut store = app.store.lock().await;
+        let mut next = store.ledger.clone();
+        next.jobs.get_mut(&id).unwrap().created_at = 0;
+        store.commit(next).unwrap();
+        app.publish(&store);
+    }
+    app.tick().await.unwrap();
+    assert_eq!(
+        app.changed.borrow().jobs[&id].outcome,
+        Some(Outcome::TimedOut)
+    );
+    assert!(!app.changed.borrow().jobs[&id].active());
+    assert_eq!(fixture.fake.lock().unwrap().deleted, vec!["123456"]);
+}
+
+#[tokio::test]
+async fn version_two_ledger_migration_preserves_jobs_and_rejects_nested_suspended_phases() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+    let id = running(&app).await;
+    let mut value = serde_json::to_value(&**app.changed.borrow()).unwrap();
+    value["version"] = json!(2);
+    value["jobs"][id.to_string()]
+        .as_object_mut()
+        .unwrap()
+        .remove("failure_error");
+    drop(app);
+    let path = fixture.config.data_dir.join("jobs.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let app = fixture.app();
+    assert_eq!(app.changed.borrow().version, 3);
+    assert!(app.changed.borrow().jobs[&id].running());
+    drop(app);
+    value["jobs"][id.to_string()]["phase"] = json!({"kind":"blocked","failures":1,"phase":{"kind":"blocked","failures":1,"phase":{"kind":"running"}}});
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(control_tower::storage::Store::open(&fixture.config.data_dir).is_err());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
 }
 
 #[tokio::test]
@@ -376,6 +758,13 @@ async fn operation_error_is_not_a_successful_provision() {
         Some(Outcome::Failed)
     );
     assert!(!app.changed.borrow().jobs[&id].active());
+    assert!(
+        app.changed.borrow().jobs[&id]
+            .failure_error
+            .as_deref()
+            .unwrap()
+            .contains("QUOTA_EXCEEDED")
+    );
 }
 
 #[tokio::test]
@@ -630,7 +1019,7 @@ async fn sdk_recovery_retains_pending_and_future_operation_statuses() {
     let app = fixture.app();
     app.tick().await.unwrap();
     assert!(matches!(
-        app.changed.borrow().jobs[&id].phase,
+        app.changed.borrow().jobs[&id].phase.work(),
         Phase::Provisioning { operation: Some(_) }
     ));
     assert!(fixture.fake.lock().unwrap().registrations.is_empty());
@@ -638,7 +1027,7 @@ async fn sdk_recovery_retains_pending_and_future_operation_statuses() {
         Some(json!({"name":"insert-1","status":"FUTURE_STATUS"}));
     app.tick().await.unwrap();
     assert!(matches!(
-        app.changed.borrow().jobs[&id].phase,
+        app.changed.borrow().jobs[&id].phase.work(),
         Phase::Provisioning { operation: Some(_) }
     ));
     assert!(
@@ -648,11 +1037,16 @@ async fn sdk_recovery_retains_pending_and_future_operation_statuses() {
             .unwrap()
             .contains("unsupported GCE operation status")
     );
+    assert!(app.changed.borrow().jobs[&id].outcome.is_none());
+    let calls = fixture.fake.lock().unwrap().operation_count;
+    app.tick().await.unwrap();
+    assert_eq!(fixture.fake.lock().unwrap().operation_count, calls);
     {
         let mut fake = fixture.fake.lock().unwrap();
         fake.operation_override = None;
         fake.pending_insert = false;
     }
+    app.retry(id).await.unwrap();
     app.tick().await.unwrap();
     app.tick().await.unwrap();
     assert!(app.changed.borrow().jobs[&id].running());
@@ -695,6 +1089,21 @@ async fn sdk_unknown_operation_during_deletion_stays_pending_until_resolved() {
         app.changed.borrow().jobs[&id].outcome,
         Some(Outcome::Cancelled)
     );
+    assert!(
+        matches!(app.changed.borrow().jobs[&id].phase.work(),Phase::Cleaning{operation:Some(name),..} if name=="delete-1")
+    );
+    let calls = fixture.fake.lock().unwrap().operation_count;
+    app.tick().await.unwrap();
+    assert_eq!(fixture.fake.lock().unwrap().operation_count, calls);
+    {
+        let mut fake = fixture.fake.lock().unwrap();
+        fake.operation_override = None;
+        fake.pending_delete = false;
+        fake.instance = None;
+    }
+    app.retry(id).await.unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&id].active());
 }
 
 #[test]
@@ -721,7 +1130,7 @@ fn version_one_ledger_migrates_without_losing_resource_or_callback_identity() {
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let store = control_tower::storage::Store::open(&temp.0).unwrap();
         let job = &store.ledger.jobs[&id.parse().unwrap()];
-        assert_eq!(store.ledger.version, 2);
+        assert_eq!(store.ledger.version, 3);
         assert_eq!(job.submission.worker_profile, "windows");
         assert_eq!(job.snapshot.worker_profile.metadata["custom"], "retained");
         assert_eq!(
@@ -743,7 +1152,7 @@ fn version_one_ledger_migrates_without_losing_resource_or_callback_identity() {
         );
         drop(store);
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["version"], 3);
         assert!(saved["jobs"][id]["submission"].get("image").is_none());
         let reopened = control_tower::storage::Store::open(&temp.0).unwrap();
         assert_eq!(reopened.ledger.jobs.len(), 1);
@@ -775,7 +1184,7 @@ fn malformed_legacy_job_fails_without_panicking_or_rewriting() {
 }
 
 #[tokio::test]
-async fn failed_delete_operation_is_retried_instead_of_polled_forever() {
+async fn failed_delete_operation_blocks_and_explicit_retry_reissues_instead_of_polling_forever() {
     let fixture = Fixture::new().await;
     let app = fixture.app();
     let id = running(&app).await;
@@ -789,13 +1198,18 @@ async fn failed_delete_operation_is_retried_instead_of_polled_forever() {
     }
     app.tick().await.unwrap();
     assert!(matches!(
-        app.changed.borrow().jobs[&id].phase,
+        app.changed.borrow().jobs[&id].phase.work(),
         Phase::Cleaning {
             operation: None,
             ..
         }
     ));
     fixture.fake.lock().unwrap().delete_error = false;
+    assert!(matches!(
+        app.changed.borrow().jobs[&id].phase,
+        Phase::Blocked { .. }
+    ));
+    app.retry(id).await.unwrap();
     app.tick().await.unwrap();
     assert!(!app.changed.borrow().jobs[&id].active());
     assert_eq!(fixture.fake.lock().unwrap().deleted.len(), 2);
@@ -820,6 +1234,13 @@ async fn ip_reuse_retires_the_old_job_before_accepting_new_worker_traffic() {
     let fixture = Fixture::new().await;
     let app = fixture.app();
     let old = running(&app).await;
+    fixture.fake.lock().unwrap().lookup_status = Some(StatusCode::FORBIDDEN);
+    app.tick().await.unwrap();
+    assert!(matches!(
+        app.changed.borrow().jobs[&old].phase,
+        Phase::Blocked { .. }
+    ));
+    fixture.fake.lock().unwrap().lookup_status = None;
     // The old GCE incarnation is gone; the replacement receives its address.
     fixture.fake.lock().unwrap().instance = None;
     let new = app.submit(submission()).await.unwrap().submission.id;

@@ -1,4 +1,4 @@
-use crate::model::Ledger;
+use crate::model::{Ledger, MAX_FAILURES, Phase};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use std::{
@@ -52,11 +52,28 @@ impl Store {
             (Ledger::default(), false)
         };
         ensure!(
-            ledger.version == 2,
+            ledger.version == 3,
             "unsupported ledger version {}",
             ledger.version
         );
         for (id, job) in &ledger.jobs {
+            if let Phase::Retrying {
+                phase, failures, ..
+            }
+            | Phase::Blocked { phase, failures } = &job.phase
+            {
+                ensure!(
+                    (1..=MAX_FAILURES).contains(failures)
+                        && matches!(
+                            **phase,
+                            Phase::Provisioning { .. }
+                                | Phase::Registering
+                                | Phase::Running
+                                | Phase::Cleaning { .. }
+                        ),
+                    "invalid suspended job phase"
+                );
+            }
             ensure!(
                 *id == job.submission.id && job.name == format!("ct-{}", id.simple()),
                 "invalid job identity in ledger"
@@ -94,7 +111,7 @@ impl Store {
         };
         if migrated {
             store.commit(store.ledger.clone())?;
-            eprintln!("migrated job ledger to version 2; GCE authentication now uses host ADC");
+            eprintln!("migrated job ledger to version 3");
         }
         Ok(store)
     }
@@ -153,12 +170,16 @@ impl Store {
     }
 }
 
-/// Version 1 stored image-profile names and a bespoke token source. Preserve
-/// every job/resource identity and callback URL; credentials now come from ADC.
+/// Preserve job/resource identities and callback URLs when upgrading retry
+/// state. Version 1 also needs image-profile and credential-source conversion.
 fn migrate(value: &mut serde_json::Value) -> Result<bool> {
     use serde_json::Value;
     match value["version"].as_u64() {
-        Some(2) => return Ok(false),
+        Some(3) => return Ok(false),
+        Some(2) => {
+            value["version"] = Value::from(3);
+            return Ok(true);
+        }
         Some(1) => {}
         version => anyhow::bail!("unsupported ledger version {version:?}"),
     }
@@ -229,6 +250,6 @@ fn migrate(value: &mut serde_json::Value) -> Result<bool> {
             _ => anyhow::bail!("unknown legacy auth configuration"),
         }
     }
-    value["version"] = Value::from(2);
+    value["version"] = Value::from(3);
     Ok(true)
 }

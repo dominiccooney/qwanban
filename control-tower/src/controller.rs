@@ -1,7 +1,7 @@
 use crate::{
     cloud::{self, Clients},
     config::{Config, validate_metadata},
-    model::{Artifact, Job, Ledger, Outcome, Phase, Snapshot, Submission, now},
+    model::{Artifact, Job, Ledger, MAX_FAILURES, Outcome, Phase, Snapshot, Submission, now},
     storage::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -97,6 +97,7 @@ impl App {
             phase: Phase::Queued,
             outcome: None,
             last_error: None,
+            failure_error: None,
             artifact: None,
         };
         let metadata = job.metadata();
@@ -148,12 +149,33 @@ impl App {
         // Keep an in-flight provisioning operation until discovery settles its outcome.
         job.outcome = Some(outcome);
         job.updated_at = now();
+        if let Phase::Retrying { phase, .. } | Phase::Blocked { phase, .. } = &job.phase {
+            job.phase = (**phase).clone();
+        }
         if matches!(job.phase, Phase::Queued) {
             job.phase = Phase::Finished;
             job.finished_at = Some(now());
         } else if !matches!(job.phase, Phase::Provisioning { .. }) {
             begin_cleanup(job);
         }
+        let result = job.clone();
+        store.commit(next)?;
+        self.publish(&store);
+        self.wake.notify_one();
+        Ok(result)
+    }
+
+    pub async fn retry(&self, id: Uuid) -> Result<Job> {
+        // Retry takes effect at this ledger commit, serialized with cloud work;
+        // it resumes the saved intent without changing resource identities.
+        let mut store = self.store.lock().await;
+        let mut next = store.ledger.clone();
+        let job = next.jobs.get_mut(&id).context("unknown job")?;
+        let Phase::Blocked { phase, .. } = &job.phase else {
+            anyhow::bail!("job is not blocked");
+        };
+        job.phase = (**phase).clone();
+        job.updated_at = now();
         let result = job.clone();
         store.commit(next)?;
         self.publish(&store);
@@ -178,9 +200,31 @@ impl App {
             if !job.active() {
                 continue;
             }
-            if job.outcome.is_none()
-                && now().saturating_sub(job.created_at) >= job.snapshot.job_timeout_secs
-            {
+            let expired = job.outcome.is_none()
+                && now().saturating_sub(job.created_at) >= job.snapshot.job_timeout_secs;
+            if !expired && matches!(job.phase, Phase::Blocked { .. }) {
+                continue;
+            }
+            let failures = match &job.phase {
+                Phase::Retrying {
+                    phase,
+                    failures,
+                    next_attempt_at,
+                } => {
+                    if !expired && now() < *next_attempt_at {
+                        continue;
+                    }
+                    let failures = *failures;
+                    job.phase = (**phase).clone();
+                    failures
+                }
+                Phase::Blocked { phase, .. } => {
+                    job.phase = (**phase).clone();
+                    0
+                }
+                _ => 0,
+            };
+            if expired {
                 job.outcome = Some(Outcome::TimedOut);
                 if matches!(job.phase, Phase::Queued) {
                     job.phase = Phase::Finished;
@@ -189,12 +233,31 @@ impl App {
                     begin_cleanup(&mut job);
                 }
             }
+            let was_provisioning = matches!(job.phase, Phase::Provisioning { .. });
             let result = advance(&mut job, &mut *self.cloud.lock().await).await;
             match result {
                 Ok(()) => job.last_error = None,
                 Err(error) => {
                     eprintln!("job {id}: {error:#}");
                     job.last_error = Some(format!("{error:#}").chars().take(4096).collect());
+                    if job.outcome == Some(Outcome::Failed) && job.failure_error.is_none() {
+                        job.failure_error = job.last_error.clone();
+                    }
+                    // A settled creation failure starts cleanup; it is not a
+                    // failed cleanup attempt and must not prevent that cleanup.
+                    if !(was_provisioning && matches!(job.phase, Phase::Cleaning { .. })) {
+                        let failures = failures + 1;
+                        let phase = Box::new(job.phase.clone());
+                        job.phase = if cloud::retryable(&error) && failures < MAX_FAILURES {
+                            Phase::Retrying {
+                                phase,
+                                failures,
+                                next_attempt_at: now().saturating_add(5u64 << (failures - 1)),
+                            }
+                        } else {
+                            Phase::Blocked { phase, failures }
+                        };
+                    }
                 }
             }
             job.updated_at = now();
@@ -386,6 +449,12 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
                 match cloud::operation_done(&op) {
                     Ok(false) => return Ok(()),
                     Err(e) => {
+                        if !matches!(
+                            op.status,
+                            Some(google_cloud_compute_v1::model::operation::Status::Done)
+                        ) {
+                            return Err(e);
+                        }
                         job.outcome.get_or_insert(Outcome::Failed);
                         begin_cleanup(job);
                         return Err(e);
@@ -507,7 +576,14 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
                             match cloud::operation_done(&op) {
                                 Ok(false) => return Ok(false),
                                 Err(error) => {
-                                    operation = None;
+                                    if matches!(
+                                        op.status,
+                                        Some(
+                                            google_cloud_compute_v1::model::operation::Status::Done
+                                        )
+                                    ) {
+                                        operation = None;
+                                    }
                                     return Err(error);
                                 }
                                 Ok(true) => {}
@@ -524,8 +600,10 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
                     match api.delete(job).await? {
                         None => Ok(true),
                         Some(op) => {
-                            let done = cloud::operation_done(&op)?;
+                            // Keep even an unsupported response's operation so
+                            // Retry polls that request instead of issuing a new one.
                             operation = Some(cloud::operation_name(&op)?);
+                            let done = cloud::operation_done(&op)?;
                             Ok(done)
                         }
                     }
@@ -533,7 +611,11 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
                 .await;
                 match result {
                     Ok(done) => delete = !done,
-                    Err(e) => error = Some(e),
+                    Err(e) => {
+                        if error.as_ref().is_none_or(cloud::retryable) {
+                            error = Some(e);
+                        }
+                    }
                 }
             }
             job.phase = if !unregister && !delete {
@@ -551,6 +633,9 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
             }
         }
         Phase::Finished => {}
+        Phase::Retrying { .. } | Phase::Blocked { .. } => {
+            unreachable!("suspended phases are handled by reconciliation")
+        }
     }
     Ok(())
 }

@@ -18,9 +18,10 @@
 		created_at: number;
 		updated_at: number;
 		ip: string | null;
-		phase: { kind: string };
+		phase: { kind: string; phase?: { kind: string }; failures?: number; next_attempt_at?: number };
 		outcome: string | null;
 		last_error: string | null;
+		failure_error: string | null;
 		artifact: { bytes: number } | null;
 	}
 	let jobs: Job[] = $state([]);
@@ -78,7 +79,9 @@
 		reloadError = data.reload_error;
 		if (!workerProfile && workerProfiles.length) workerProfile = workerProfiles[0];
 		const running = new Set(
-			jobs.filter((job) => job.phase.kind === 'running').map((job) => job.submission.id)
+			jobs
+				.filter((job) => !job.outcome && (job.phase.phase?.kind ?? job.phase.kind) === 'running')
+				.map((job) => job.submission.id)
 		);
 		for (const [id, host] of hosts) {
 			if (!running.has(id)) {
@@ -157,6 +160,15 @@
 			error = String(cause);
 		}
 	}
+	async function retry(job: Job): Promise<void> {
+		try {
+			await request(`/api/jobs/${job.submission.id}/retry`, {});
+			await refresh();
+			error = '';
+		} catch (cause) {
+			error = String(cause);
+		}
+	}
 </script>
 
 <svelte:head><title>Control Tower</title></svelte:head>
@@ -219,10 +231,21 @@
 							· {job.outcome}{/if}
 					</p>
 					{#if job.last_error}<p class="error">{job.last_error}</p>{/if}
+					{#if job.phase.kind === 'blocked'}<p class="error">
+							Automatic attempts stopped. Fix the cause, then retry. Any existing VM or cleanup
+							remains pending.
+						</p>{/if}
+					{#if job.phase.kind === 'retrying' && job.phase.next_attempt_at}<p class="meta">
+							Attempt {job.phase.failures} failed; retry after {new Date(
+								job.phase.next_attempt_at * 1000
+							).toLocaleTimeString()}.
+						</p>{/if}
 					{#if host}<HostChit {host} onOpen={() => (selected = job.submission.id)}
 							>{#snippet controls()}{/snippet}</HostChit
 						>{/if}
 					<div class="actions">
+						{#if job.phase.kind === 'blocked'}<button onclick={() => void retry(job)}>Retry</button
+							>{/if}
 						<button
 							onclick={() =>
 								(details = details === job.submission.id ? undefined : job.submission.id)}
@@ -252,6 +275,9 @@
 					></summary
 				>
 				<p>Submitted by {job.submission.source} · <code>{job.submission.id}</code></p>
+				{#if job.failure_error ?? job.last_error}<p class="error">
+						{job.failure_error ?? job.last_error}
+					</p>{/if}
 				<pre>{job.submission.prompt}</pre>
 				<pre>{job.submission.setup_script}</pre>
 				{#if job.artifact}

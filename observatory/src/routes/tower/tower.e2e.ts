@@ -1,5 +1,24 @@
 import { expect, test } from '@playwright/test';
 
+test('shows insufficient scopes as blocked and explicitly retries the same job', async ({
+	page
+}) => {
+	await page.goto('/tower');
+	await page.getByText('Launch a job', { exact: true }).click();
+	await page.getByLabel('Title', { exact: true }).fill('Scope failure');
+	await page.getByLabel('Prompt', { exact: true }).fill('Test insufficient scopes');
+	await page.getByRole('button', { name: 'Launch job', exact: true }).click();
+	const card = page.locator('article').filter({ hasText: 'Scope failure' });
+	await expect(card.getByText('blocked', { exact: true })).toBeVisible({ timeout: 15000 });
+	await expect(card).toContainText('insufficient authentication scopes');
+	await expect(card).toContainText('Automatic attempts stopped.');
+	await card.getByRole('button', { name: 'Retry', exact: true }).click();
+	await expect(card.getByText('running', { exact: true })).toBeVisible({ timeout: 15000 });
+	page.once('dialog', (dialog) => void dialog.accept());
+	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(card).toHaveCount(0, { timeout: 15000 });
+});
+
 test('launches through the real controller and relays transcript, capture and screenshots', async ({
 	page
 }) => {
@@ -26,8 +45,8 @@ test('launches through the real controller and relays transcript, capture and sc
 	await page.getByRole('button', { name: '← Back' }).click();
 	page.once('dialog', (dialog) => void dialog.accept());
 	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
-	await expect(page.locator('article')).toHaveCount(0, { timeout: 15000 });
-	const history = page.locator('.history');
+	await expect(card).toHaveCount(0, { timeout: 15000 });
+	const history = page.locator('.history').filter({ hasText: 'Browser QA' });
 	await expect(history).toContainText('cancelled');
 	await history.locator('summary').click();
 	await expect(history).toContainText('Inspect the checkout');

@@ -6,6 +6,8 @@ use std::{
 };
 use uuid::Uuid;
 
+pub const MAX_FAILURES: u32 = 5;
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -59,7 +61,25 @@ pub enum Phase {
         delete: bool,
         operation: Option<String>,
     },
+    Retrying {
+        phase: Box<Phase>,
+        failures: u32,
+        next_attempt_at: u64,
+    },
+    Blocked {
+        phase: Box<Phase>,
+        failures: u32,
+    },
     Finished,
+}
+
+impl Phase {
+    pub fn work(&self) -> &Self {
+        match self {
+            Self::Retrying { phase, .. } | Self::Blocked { phase, .. } => phase,
+            _ => self,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,6 +103,8 @@ pub struct Job {
     pub phase: Phase,
     pub outcome: Option<Outcome>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub failure_error: Option<String>,
     pub artifact: Option<Artifact>,
 }
 
@@ -91,7 +113,7 @@ impl Job {
         !matches!(self.phase, Phase::Finished)
     }
     pub fn running(&self) -> bool {
-        matches!(self.phase, Phase::Running) && self.outcome.is_none()
+        matches!(self.phase.work(), Phase::Running) && self.outcome.is_none()
     }
     pub fn metadata(&self) -> BTreeMap<String, String> {
         let mut items = self.snapshot.worker_profile.metadata.clone();
@@ -126,7 +148,7 @@ pub struct Ledger {
 impl Default for Ledger {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             jobs: BTreeMap::new(),
             retired_ids: BTreeSet::new(),
         }

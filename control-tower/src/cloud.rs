@@ -6,9 +6,62 @@ use google_cloud_compute_v1::{
     client::{Instances, ZoneOperations},
     model::{self, Instance, Operation},
 };
-use google_cloud_gax::retry_policy::NeverRetry;
+use google_cloud_gax::{
+    error::{CredentialsError, Error, rpc::Code},
+    retry_policy::NeverRetry,
+};
 use serde_json::json;
 use std::{collections::HashMap, time::Duration};
+
+/// Retry only failures whose declared contract permits another attempt. Unknown
+/// responses, ownership violations and invalid input require operator action.
+pub fn retryable(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(credentials) = cause.downcast_ref::<CredentialsError>() {
+            return credentials.is_transient();
+        }
+    }
+    for cause in error.chain() {
+        if cause.is::<tokio::time::error::Elapsed>() {
+            return true;
+        }
+        if let Some(error) = cause.downcast_ref::<Error>() {
+            if error.is_timeout() {
+                return true;
+            }
+            if let Some(status) = error.http_status_code() {
+                return transient_status(status);
+            }
+            if let Some(status) = error.status() {
+                return matches!(
+                    status.code,
+                    Code::Unavailable
+                        | Code::DeadlineExceeded
+                        | Code::ResourceExhausted
+                        | Code::Aborted
+                        | Code::Internal
+                );
+            }
+            if error.is_deserialization() || error.is_serialization() {
+                return false;
+            }
+            // With no service status or format error, the SDK failure may have
+            // an uncertain network outcome. Keep its resource identity and retry.
+            return true;
+        }
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            return error
+                .status()
+                .map(|status| transient_status(status.as_u16()))
+                .unwrap_or(error.is_connect() || error.is_timeout());
+        }
+    }
+    false
+}
+
+fn transient_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
 
 // Friendzone and the operator CLI use direct HTTP; GCE uses the official SDK.
 pub fn client(seconds: u64) -> Result<reqwest::Client> {
@@ -63,6 +116,8 @@ impl Clients {
     }
 
     pub async fn for_job(&mut self, job: &Job) -> Result<Api> {
+        // Proxy routing and credential selection belong to the process
+        // environment and take effect on server restart.
         let key = (
             job.snapshot.cloud.endpoint.clone(),
             job.snapshot.request_timeout_secs,
@@ -286,9 +341,12 @@ pub async fn register(job: &Job) -> Result<()> {
         .json(&json!({"name":job.name,"ip":job.ip.context("registration requires an IP")?}))
         .send()
         .await?;
+    let response = response
+        .error_for_status()
+        .context("Friendzone registration")?;
     ensure!(
         response.status().is_success(),
-        "Friendzone registration: {}",
+        "Friendzone registration redirected: {}",
         response.status()
     );
     Ok(())
@@ -303,9 +361,10 @@ pub async fn unregister(job: &Job) -> Result<()> {
         ))
         .send()
         .await?;
+    let response = response.error_for_status().context("Friendzone removal")?;
     ensure!(
         response.status().is_success(),
-        "Friendzone removal: {}",
+        "Friendzone removal redirected: {}",
         response.status()
     );
     Ok(())

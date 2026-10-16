@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 const root = await mkdtemp(path.join(os.tmpdir(), 'tower-browser-'));
 await cp(path.resolve('build'), path.join(root, 'ui'), { recursive: true });
 const instances = new Map();
+const rejected = new Set();
 let nextId = 1;
 const cloud = http.createServer(async (request, response) => {
 	let text = '';
@@ -40,6 +41,26 @@ const cloud = http.createServer(async (request, response) => {
 		return response.end(JSON.stringify({ name: url.pathname.split('/').at(-1), status: 'DONE' }));
 	if (request.method === 'POST') {
 		const body = JSON.parse(text);
+		// Reject one real SDK insertion per selected job, then allow an
+		// operator retry of the same insertion UUID to succeed.
+		if (
+			body.metadata?.items?.some(
+				(item) => item.key === 'control-tower-prompt' && item.value === 'Test insufficient scopes'
+			) &&
+			!rejected.has(body.name)
+		) {
+			rejected.add(body.name);
+			response.statusCode = 403;
+			return response.end(
+				JSON.stringify({
+					error: {
+						code: 403,
+						message: 'Request had insufficient authentication scopes.',
+						status: 'PERMISSION_DENIED'
+					}
+				})
+			);
+		}
 		const instance = {
 			id: String(nextId++),
 			name: body.name,
@@ -195,8 +216,8 @@ const tower = spawn(packagedExecutable, ['--config', configPath, 'serve'], {
 	env: {
 		...process.env,
 		GOOGLE_APPLICATION_CREDENTIALS: credentialsPath,
-		NO_PROXY: '*',
-		no_proxy: '*'
+		NO_PROXY: '127.0.0.1,localhost',
+		no_proxy: '127.0.0.1,localhost'
 	}
 });
 let stopping = false;

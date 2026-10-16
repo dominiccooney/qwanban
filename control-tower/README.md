@@ -23,11 +23,10 @@ Copy `control-tower/config.example.yaml` to your deployment directory and edit t
 GCE uses Google's official Rust client and Application Default Credentials (ADC). On GCE, use the controller host's service account; never attach it to workers. For local development, run `gcloud auth application-default login` once. `GOOGLE_APPLICATION_CREDENTIALS` can select a credential file. Credential selection takes effect at server startup; the SDK caches and refreshes access tokens. `cloud.endpoint` is an origin such as `https://compute.googleapis.com`; the SDK supplies `/compute/v1`. Do not include that path in the endpoint.
 
 ```sh
-export NO_PROXY='*'
 control-tower --config /etc/control-tower/config.yaml serve
 ```
 
-In PowerShell, set `$env:NO_PROXY = '*'` before `serve`. Startup rejects a missing or narrower bypass value; the Google SDK does not expose a public per-client proxy override.
+The Google SDK owns API and authentication networking. Configure `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` for your deployment; Control Tower does not require `NO_PROXY=*` or override SDK routing. Restart the server after changing its proxy environment or credential selection. Friendzone management and operator CLI calls use direct loopback HTTP.
 
 Forward the configured operator port, then open `/tower` (the root redirects there):
 
@@ -43,6 +42,7 @@ control-tower --config /etc/control-tower/config.yaml submit \
   --prompt /srv/jobs/prompt.txt --setup-script /srv/jobs/setup.ps1
 control-tower --config /etc/control-tower/config.yaml list
 control-tower --config /etc/control-tower/config.yaml cancel JOB_UUID
+control-tower --config /etc/control-tower/config.yaml retry JOB_UUID
 ```
 
 Submission prints its UUID before making the request. Reuse `--id UUID` with exactly the same submission when retrying an uncertain request. An existing ID returns the existing job, not another VM. Expired IDs cannot be reused.
@@ -90,22 +90,23 @@ Enforce outside the guest:
 - Check that Friendzone cannot relay to Control Tower management through hostname aliases or another host service. Its existing protections are not a general resolved-DNS LAN firewall; use host firewall/process confinement where necessary.
 - Audit project-level startup scripts/metadata and guest-installed software. Do not place controller credentials in the worker image or metadata.
 
-Give only the **controller** the GCE permissions needed to create/get/delete instances, get zonal operations, create/use boot disks and read the configured images/subnetwork. Prefer a scoped custom IAM role. Friendzone/CLI HTTP calls disable environment proxies and redirects. Google's SDK uses its own transport and ADC; the required `NO_PROXY=*` keeps cloud/auth traffic direct. Its redirect behavior is the SDK default, so trust and protect endpoint/credential configuration. GCE failures/timeouts remain pending or visible errors; they do not silently remove a worker. SDK RPC retries and automatic operation polling are disabled: Control Tower persists operation names and retries from the ledger, with an outer deadline covering authentication and the RPC.
+Give only the **controller** the GCE permissions needed to create/get/delete instances, get zonal operations, create/use boot disks and read the configured images/subnetwork. Prefer a scoped custom IAM role. Friendzone/CLI HTTP calls disable environment proxies and redirects. Google's SDK uses its own transport and ADC; its redirect behavior is the SDK default, so trust and protect endpoint/credential configuration. GCE failures/timeouts remain pending or visible errors; they do not silently remove a worker. SDK RPC retries and automatic operation polling are disabled: Control Tower persists operation names and retries from the ledger, with an outer deadline covering authentication and the RPC.
 
 ## Reload and recovery
 
 The service checks YAML contents each second, including atomic file replacements. Invalid YAML, unknown fields and invalid values retain the last good snapshot and show an error in the UI. Listener addresses and data/UI directories require restart; changing one rejects the entire reload. Worker profiles, endpoint and provisioning settings apply to **new submissions**; existing jobs retain their configuration snapshot for recovery and cleanup. Limits apply to the next request/maintenance pass; an upload/relay already admitted retains its limits.
 
-To upgrade the first configuration format, rename `images` to `worker_profiles`, replace `cloud.api_url` with the origin-only `cloud.endpoint`, and remove `worker_url` and `cloud.auth`. The CLI flag/API submission field are now `--worker-profile`/`worker_profile`. Version-1 ledgers migrate atomically to version 2, preserving identities, operation names, resolved profiles and existing callback URLs. Old per-job token sources are replaced by host ADC: configure equivalent permissions **before restarting**. Older binaries cannot read version 2; back up the stopped service's data directory before upgrading if rollback is needed. YAML is not rewritten automatically; old fields are rejected.
+To upgrade the first configuration format, rename `images` to `worker_profiles`, replace `cloud.api_url` with the origin-only `cloud.endpoint`, and remove `worker_url` and `cloud.auth`. The CLI flag/API submission field are now `--worker-profile`/`worker_profile`. Version-1 and version-2 ledgers migrate atomically to version 3, preserving identities, operation names, resolved profiles and existing callback URLs. Old per-job token sources are replaced by host ADC: configure equivalent permissions **before restarting**. Older binaries cannot read version 3; back up the stopped service's data directory before upgrading if rollback is needed. YAML is not rewritten automatically; old fields are rejected.
 
-Provisioning settings are persisted, so keep old cloud/Friendzone endpoints available until their jobs finish. Cloud API errors are not evidence of death. Missing or stopped instances become `lost`, enter cleanup, and leave the active list only once removal/deletion finishes. Failed Friendzone removal does not prevent VM deletion; removal continues retrying. Ctrl-C stops the service without deleting active jobs; restart with the same data directory to resume them. Ledger commit failures stop background reconciliation rather than continue with unrecorded writes.
+Provisioning settings are persisted, so keep old cloud/Friendzone endpoints available until their jobs finish. Cloud API errors are not evidence of death. Missing or stopped instances become `lost`, enter cleanup, and leave the active list only once removal/deletion finishes. Failed Friendzone removal does not prevent an independent VM deletion attempt. Ctrl-C stops the service without deleting active jobs; restart with the same data directory to resume them. Ledger commit failures stop background reconciliation rather than continue with unrecorded writes.
+
+Insufficient scopes, denied permissions, invalid requests and unsupported responses stop automatic attempts and show `blocked` with the error. Transient network/timeouts, rate limits and service failures back off for 5, 10, 20 and 40 seconds; the fifth consecutive failure blocks the job. A successful reconciliation resets the failure count. These retry states survive restart. After fixing the cause, use **Retry**, the CLI `retry JOB_UUID`, or `POST /api/jobs/JOB_UUID/retry` with `{}` to resume the same job, insertion UUID and pending operation. A blocked job is not finished: it may still own a VM or need cleanup. Cancel requests cleanup without discarding uncertain provisioning; cleanup can itself block and need Retry. Job deadlines still initiate cleanup while monitoring is blocked.
 
 The lifecycle controller is deliberately serialized. Slow cloud calls can delay submissions/completion; the read-only dashboard uses the last committed snapshot. The ledger is intended for a modest single-controller installation, not a distributed scheduler. Transcripts and screenshots remain qbt's live bounded journal and disappear with its VM unless the worker includes them in its packet.
 
 ## Tests
 
 ```sh
-export NO_PROXY='*'
 cargo test -p control-tower
 cd observatory
 bunx playwright install chromium
@@ -113,7 +114,7 @@ bunx playwright test --config playwright.tower.config.ts
 cd ..
 ```
 
-Integration tests use local HTTP/WebSocket fixtures, not your GCE project. For a deployment smoke test, use a disposable image and enforced network rules:
+Integration tests use local HTTP/WebSocket fixtures, not your GCE project. If your environment uses a proxy, bypass `localhost` and `127.0.0.1` for these fixtures. For a deployment smoke test, use a disposable image and enforced network rules:
 
 1. Submit a short task. Verify its private IP is pinned in Friendzone and the dashboard shows its submission, transcript and screenshot. Take a fresh screenshot through the SSH tunnel.
 2. Upload a packet and report completion. Verify the packet downloads intact and both the VM **and boot disk** disappear.

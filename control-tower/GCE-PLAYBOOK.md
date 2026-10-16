@@ -313,7 +313,7 @@ The loader checks syntax and replaces only its own table in one nftables batch. 
 
 ## 5. Install services — Ubuntu controller
 
-Generate Friendzone's service with the chosen private address, and install Control Tower's unit:
+Generate Friendzone's service with the chosen private address, and install Control Tower's unit. The direct-networking environment below is a choice for this isolated deployment, not a requirement of current Control Tower. Configure SDK proxy routing to suit your network; the pinned older binary still requires `NO_PROXY=*`.
 
 ```bash
 sudo tee /etc/systemd/system/friendzone.service >/dev/null <<EOF

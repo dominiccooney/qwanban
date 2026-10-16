@@ -34,6 +34,9 @@ enum Command {
     Cancel {
         id: Uuid,
     },
+    Retry {
+        id: Uuid,
+    },
 }
 
 #[tokio::main]
@@ -88,6 +91,13 @@ async fn main() -> Result<()> {
                 .send()
                 .await?
         }
+        Command::Retry { id } => {
+            client
+                .post(format!("{base}/api/jobs/{id}/retry"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await?
+        }
         Command::Serve => unreachable!(),
     };
     let status = response.status();
@@ -105,14 +115,6 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(config: Config, path: PathBuf) -> Result<()> {
-    // The SDK owns its HTTP transport. Require a direct route for cloud and
-    // credential requests instead of allowing inherited proxy configuration.
-    ensure!(
-        std::env::var("NO_PROXY")
-            .or_else(|_| std::env::var("no_proxy"))
-            .is_ok_and(|value| value.trim() == "*"),
-        "set NO_PROXY=* before starting Control Tower so SDK cloud/auth requests bypass proxies"
-    );
     let operator = tokio::net::TcpListener::bind(config.operator_addr).await?;
     let worker = tokio::net::TcpListener::bind(config.worker_addr).await?;
     let credentials = google_cloud_auth::credentials::Builder::default()
