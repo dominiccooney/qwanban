@@ -25,6 +25,22 @@ cargo run -- serve 1234 5678 --max-screenshots 200 --artifact-root runs
 The startup log estimates the buffer's memory from a fresh PNG sample. Both
 settings take effect when the server starts.
 
+Pass `--record-journal` to also persist every journal event and full-screen PNG
+under `<artifact-root>/journal/<pid>-<nanos>-<seq>/` (`events.jsonl`,
+`screenshots/<id>.png`, and `status.json`), independent of the live 500-event
+and `--max-screenshots` memory rings:
+
+```powershell
+cargo run -- serve 1234 5678 --artifact-root runs --record-journal --journal-max-bytes 536870912
+```
+
+Each backend incarnation creates its own subdirectory so a backend restart
+never overwrites earlier recordings. `status.json` starts with
+`"complete": false` and is atomically updated to `"complete": true` only when
+`qbt` exits cleanly. Reaching `--journal-max-bytes` (default 512 MiB) or an I/O
+failure records `"error"` in `status.json` and stops the backend rather than
+continuing with an incomplete recording.
+
 qbt keeps the newest 500 events in an in-memory journal: it
 records every computer action it executes (with a full-screen screenshot for
 screen-capturing actions), and the agent publishes transcript and status

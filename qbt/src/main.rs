@@ -12,6 +12,7 @@ mod journal;
 mod marks;
 mod observed;
 mod pal;
+mod recording;
 
 #[derive(Parser)]
 #[command(about = "Qwanban native support tools", name = "qbt")]
@@ -31,6 +32,12 @@ enum CliCommand {
         artifact_root: PathBuf,
         #[arg(long, default_value_t = journal::DEFAULT_MAX_SCREENSHOTS)]
         max_screenshots: usize,
+        /// Persist events and screenshots under artifact-root/journal.
+        #[arg(long)]
+        record_journal: bool,
+        /// Event JSON and PNG byte limit for this backend incarnation.
+        #[arg(long, default_value_t = 512 * 1024 * 1024, value_parser = clap::value_parser!(u64).range(1..))]
+        journal_max_bytes: u64,
     },
     Flipbook {
         #[arg(long)]
@@ -60,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
             ws_port,
             artifact_root,
             max_screenshots,
+            record_journal,
+            journal_max_bytes,
         }) => {
             anyhow::ensure!(
                 *max_screenshots > 0,
@@ -69,9 +78,11 @@ async fn main() -> anyhow::Result<()> {
             // writes computer actions and published events into it; the
             // observatory server only reads. Shutdown is one cancellation
             // token shared by both servers and all their connections.
-            let journal = journal::Journal::new(*max_screenshots);
             let artifacts = std::sync::Arc::new(artifacts::ArtifactStore::new(artifact_root)?);
             let shutdown = CancellationToken::new();
+            let journal = if *record_journal {
+                journal::Journal::recording(*max_screenshots, recording::Recording::new(&artifacts, *journal_max_bytes, shutdown.clone())?)
+            } else { journal::Journal::new(*max_screenshots) };
 
             eprintln!("artifact root: {}", artifacts.root().display());
 
@@ -119,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
                 observatory_result?;
             }
             clipboard_result?;
+            journal.finish_recording()?;
             Ok(())
         }
         Some(CliCommand::Flipbook {

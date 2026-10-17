@@ -1,4 +1,4 @@
-//! In-memory journal of everything observable about this host.
+//! Bounded live journal with optional ordered on-disk recording.
 //!
 //! The journal is the single source of truth the observatory reads. Two
 //! producers write to it: the agent server journals computer actions and
@@ -35,6 +35,7 @@ struct State {
     events: VecDeque<Arc<JournalEvent>>,
     screenshots: VecDeque<(String, Arc<Vec<u8>>)>,
     next_seq: u64,
+    recording: Option<crate::recording::Recording>,
 }
 
 pub(crate) struct Journal {
@@ -45,12 +46,21 @@ pub(crate) struct Journal {
 
 impl Journal {
     pub(crate) fn new(max_screenshots: usize) -> Arc<Self> {
+        Self::create(max_screenshots, None)
+    }
+
+    pub(crate) fn recording(max_screenshots: usize, recording: crate::recording::Recording) -> Arc<Self> {
+        Self::create(max_screenshots, Some(recording))
+    }
+
+    fn create(max_screenshots: usize, recording: Option<crate::recording::Recording>) -> Arc<Self> {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
             state: Mutex::new(State {
                 events: VecDeque::new(),
                 screenshots: VecDeque::new(),
                 next_seq: 1,
+                recording,
             }),
             sender,
             max_screenshots,
@@ -69,9 +79,10 @@ impl Journal {
         let mut state = self.state.lock().unwrap();
         let seq = state.next_seq;
         state.next_seq += 1;
-        let screenshot_id = screenshot_png.map(|png| {
+        let screenshot_png = screenshot_png.map(Arc::new);
+        let screenshot_id = screenshot_png.as_ref().map(|png| {
             let id = format!("shot_{}", seq);
-            state.screenshots.push_back((id.clone(), Arc::new(png)));
+            state.screenshots.push_back((id.clone(), Arc::clone(png)));
             while state.screenshots.len() > self.max_screenshots {
                 state.screenshots.pop_front();
             }
@@ -84,6 +95,9 @@ impl Journal {
             payload,
             screenshot_id,
         });
+        if let Some(recording) = &mut state.recording {
+            recording.append(&event, screenshot_png.as_deref().map(Vec::as_slice));
+        }
         state.events.push_back(event.clone());
         while state.events.len() > MAX_EVENTS {
             state.events.pop_front();
@@ -91,6 +105,11 @@ impl Journal {
         // Ignore the error: no subscribers is fine.
         let _ = self.sender.send(event.clone());
         event
+    }
+
+    pub(crate) fn finish_recording(&self) -> anyhow::Result<()> {
+        if let Some(recording) = &mut self.state.lock().unwrap().recording { recording.finish()?; }
+        Ok(())
     }
 
     /// Subscribes and snapshots atomically: the receiver sees exactly the
@@ -156,7 +175,7 @@ impl Journal {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)

@@ -78,6 +78,14 @@ Use `"failed"` instead of `"completed"` for task failure. Retry non-success resp
 
 Packets are streamed with size, storage-budget and time limits, checked for zstd frame magic, and stored without decompressing or extracting. Frame magic is not archive validation. Treat downloaded contents as untrusted. Oldest finished packets expire when storage exceeds the configured budget; history is also bounded by `max_finished_jobs`. Pending uploads reserve capacity and never become downloads. Small retired-ID tombstones remain to prevent identity reuse.
 
+For Windows workers, [`control-tower/worker/worker.ps1`](worker/worker.ps1) provides PowerShell 7 helpers for the interactive desktop account (`qa`):
+
+- `Read-QwanbanWorkerMetadata` and `Wait-QwanbanFriendzoneApproval` read the `control-tower-*` and `friendzone-bootstrap-url` metadata attributes directly (`--noproxy '*'`) and poll `/bootstrap/hello` until `approved: true`.
+- `Initialize-QwanbanWorkerJob` creates an isolated `<RunsRoot>/<job-id>/` directory (`run.json`, `prompt.txt`, `setup.ps1`, `job-env.ps1`, `cline/`, `qbt/`, `output/`, `package/`). Dot-sourcing `job-env.ps1` sets `CLINE_SESSION_BACKEND_MODE=local`, job-scoped `CLINE_SESSION_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_LOG_PATH`, `CLINE_HOOKS_LOG_PATH`, `CLINE_COMPUTER_USE_PORT`, and a `CLINE_COMPUTER_USE_BACKEND_COMMAND` that starts `qbt serve --record-journal` against `<job-root>/qbt` while leaving `~/.cline` (`CLINE_DIR`) intact for Friendzone's plugin and provider settings.
+- `Complete-QwanbanWorkerJob` stops `qbt` cleanly (`shutdown_backend`), verifies all tracked writer PIDs have exited and every `qbt/journal/*/status.json` is complete (`complete: true` required for `completed` outcomes), builds `package/results.tar.zst` once via `C:\Windows\System32\tar.exe --zstd -cf`, uploads `/jobs/{id}/artifact` (`201`/`204`), and only then reports `/jobs/{id}/complete` (`202`).
+
+Note that on the `dpc/computer-use` Cline branch, `CLINE_COMPUTER_USE_PORT` registers the `computer` tool only in interactive TUI mode (`cline` without headless `--prompt`/`--yolo`/`--output json` flags).
+
 ## Network and cloud prerequisites
 
 The operator listener must be loopback; the worker listener must bind a specific interface on a different port. The worker router exposes only upload/completion. It never exposes submission, listing, cancellation, downloads or relays. Forwarded-IP headers are ignored. Browser Host/Origin checks guard the unauthenticated operator interface against cross-origin requests and DNS rebinding; local processes remain trusted.
@@ -108,6 +116,7 @@ The lifecycle controller is deliberately serialized. Slow cloud calls can delay 
 
 ```sh
 cargo test -p control-tower
+pwsh -NoProfile -File control-tower/worker/test-worker.ps1
 cd observatory
 bunx playwright install chromium
 bunx playwright test --config playwright.tower.config.ts
