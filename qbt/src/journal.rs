@@ -1,4 +1,4 @@
-//! Bounded live journal with optional ordered on-disk recording.
+//! Bounded disk-backed journal.
 //!
 //! The journal is the single source of truth the observatory reads. Two
 //! producers write to it: the agent server journals computer actions and
@@ -7,18 +7,29 @@
 //! (transcripts, coordinator status changes) over the same socket. Observers are
 //! pure subscribers: they take a snapshot plus a live stream, both in one
 //! total order (`seq`).
+//!
+//! Events and full-screen PNGs are persisted under `<artifact-root>/journal/`
+//! (`events.jsonl` and `screenshots/shot_<seq>.png`) and bounded as a sliding
+//! window: when screenshots or events age past the retention window, the
+//! oldest files are unlinked and `events.jsonl` is compacted. Reopening the
+//! journal in the same artifact root resumes `seq` monotonically so backend
+//! restarts neither lose recent context nor accumulate unbounded files.
 
-use serde::Serialize;
-use std::collections::VecDeque;
+use crate::artifacts::ArtifactStore;
+use anyhow::Context;
+use cap_std::fs::{Dir, File, OpenOptions};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
+use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-const MAX_EVENTS: usize = 500;
-const BROADCAST_CAPACITY: usize = 256;
+pub(crate) const MAX_EVENTS: usize = 2_000;
+const BROADCAST_CAPACITY: usize = 512;
 
-pub(crate) const DEFAULT_MAX_SCREENSHOTS: usize = 200;
+pub(crate) const DEFAULT_MAX_SCREENSHOTS: usize = 500;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JournalEvent {
     pub seq: u64,
@@ -32,39 +43,142 @@ pub(crate) struct JournalEvent {
 }
 
 struct State {
+    directory: Dir,
+    events_file: Option<File>,
+    lines_on_disk: usize,
     events: VecDeque<Arc<JournalEvent>>,
-    screenshots: VecDeque<(String, Arc<Vec<u8>>)>,
+    screenshots: VecDeque<String>,
     next_seq: u64,
-    recording: Option<crate::recording::Recording>,
 }
 
 pub(crate) struct Journal {
-    state: Mutex<State>,
+    state: Mutex<Option<State>>,
     sender: broadcast::Sender<Arc<JournalEvent>>,
+    max_events: usize,
     max_screenshots: usize,
+    #[cfg(test)]
+    temp_root: Option<std::path::PathBuf>,
 }
 
 impl Journal {
-    pub(crate) fn new(max_screenshots: usize) -> Arc<Self> {
-        Self::create(max_screenshots, None)
-    }
-
-    pub(crate) fn recording(max_screenshots: usize, recording: crate::recording::Recording) -> Arc<Self> {
-        Self::create(max_screenshots, Some(recording))
-    }
-
-    fn create(max_screenshots: usize, recording: Option<crate::recording::Recording>) -> Arc<Self> {
-        let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Arc::new(Self {
-            state: Mutex::new(State {
-                events: VecDeque::new(),
-                screenshots: VecDeque::new(),
-                next_seq: 1,
-                recording,
-            }),
-            sender,
+    pub(crate) fn open(
+        artifacts: &ArtifactStore,
+        max_screenshots: usize,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::open_with_limits(
+            artifacts,
+            MAX_EVENTS.max(max_screenshots),
             max_screenshots,
-        })
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn open_with_limits(
+        artifacts: &ArtifactStore,
+        max_events: usize,
+        max_screenshots: usize,
+        #[cfg(test)] temp_root: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<Arc<Self>> {
+        anyhow::ensure!(max_events > 0, "max_events must be greater than zero");
+        anyhow::ensure!(
+            max_screenshots > 0,
+            "--max-screenshots must be greater than zero"
+        );
+        let directory = artifacts.journal_directory()?;
+        directory.create_dir_all("screenshots")?;
+        let _ = directory.remove_file("events.tmp");
+
+        let mut events = VecDeque::new();
+        let mut next_seq = 1u64;
+        if let Ok(file) = directory.open("events.jsonl") {
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<JournalEvent>(&line) {
+                    Ok(event) => {
+                        next_seq = next_seq.max(event.seq.saturating_add(1));
+                        events.push_back(Arc::new(event));
+                        while events.len() > max_events {
+                            events.pop_front();
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("ignoring corrupt journal line in events.jsonl: {error}");
+                    }
+                }
+            }
+        }
+
+        let mut screenshots = VecDeque::new();
+        for event in &events {
+            if let Some(id) = &event.screenshot_id
+                && directory.exists(format!("screenshots/{id}.png"))
+            {
+                screenshots.push_back(id.clone());
+            }
+        }
+        while screenshots.len() > max_screenshots {
+            if let Some(evicted) = screenshots.pop_front() {
+                let _ = directory.remove_file(format!("screenshots/{evicted}.png"));
+            }
+        }
+
+        let retained_files: HashSet<String> = screenshots
+            .iter()
+            .map(|id| format!("{id}.png"))
+            .collect();
+        if let Ok(entries) = directory.read_dir("screenshots") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !retained_files.contains(&name) {
+                    let _ = directory.remove_file(format!("screenshots/{name}"));
+                }
+            }
+        }
+
+        let lines_on_disk = compact_events_file(&directory, &events)?;
+        let events_file = open_append(&directory)?;
+        let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
+        Ok(Arc::new(Self {
+            state: Mutex::new(Some(State {
+                directory,
+                events_file: Some(events_file),
+                lines_on_disk,
+                events,
+                screenshots,
+                next_seq,
+            })),
+            sender,
+            max_events,
+            max_screenshots,
+            #[cfg(test)]
+            temp_root,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(max_screenshots: usize) -> Arc<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qbt-journal-test-{}-{}-{}",
+            std::process::id(),
+            now_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let store = ArtifactStore::new(&root).unwrap();
+        Self::open_with_limits(
+            &store,
+            MAX_EVENTS.max(max_screenshots),
+            max_screenshots,
+            Some(root),
+        )
+        .unwrap()
     }
 
     /// Appends an event, optionally storing a PNG screenshot the event
@@ -76,17 +190,25 @@ impl Journal {
         payload: serde_json::Value,
         screenshot_png: Option<Vec<u8>>,
     ) -> Arc<JournalEvent> {
-        let mut state = self.state.lock().unwrap();
+        let mut guard = self.state.lock().unwrap();
+        let state = guard.as_mut().expect("journal state is initialized");
         let seq = state.next_seq;
         state.next_seq += 1;
-        let screenshot_png = screenshot_png.map(Arc::new);
-        let screenshot_id = screenshot_png.as_ref().map(|png| {
+        let screenshot_id = screenshot_png.and_then(|png| {
             let id = format!("shot_{}", seq);
-            state.screenshots.push_back((id.clone(), Arc::clone(png)));
-            while state.screenshots.len() > self.max_screenshots {
-                state.screenshots.pop_front();
+            if let Err(error) = write_screenshot(&state.directory, &id, &png) {
+                eprintln!("failed to write journal screenshot {id}: {error:#}");
+                return None;
             }
-            id
+            state.screenshots.push_back(id.clone());
+            while state.screenshots.len() > self.max_screenshots {
+                if let Some(evicted) = state.screenshots.pop_front() {
+                    let _ = state
+                        .directory
+                        .remove_file(format!("screenshots/{evicted}.png"));
+                }
+            }
+            Some(id)
         });
         let event = Arc::new(JournalEvent {
             seq,
@@ -95,20 +217,24 @@ impl Journal {
             payload,
             screenshot_id,
         });
-        if let Some(recording) = &mut state.recording {
-            recording.append(&event, screenshot_png.as_deref().map(Vec::as_slice));
-        }
         state.events.push_back(event.clone());
-        while state.events.len() > MAX_EVENTS {
+        while state.events.len() > self.max_events {
             state.events.pop_front();
+        }
+        if let Err(error) = persist_event(state, &event, self.max_events) {
+            eprintln!("failed to persist journal event {seq}: {error:#}");
         }
         // Ignore the error: no subscribers is fine.
         let _ = self.sender.send(event.clone());
         event
     }
 
-    pub(crate) fn finish_recording(&self) -> anyhow::Result<()> {
-        if let Some(recording) = &mut self.state.lock().unwrap().recording { recording.finish()?; }
+    /// Compacts `events.jsonl` to the active window and closes the append handle.
+    pub(crate) fn flush(&self) -> anyhow::Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        let state = guard.as_mut().expect("journal state is initialized");
+        state.events_file = None;
+        state.lines_on_disk = compact_events_file(&state.directory, &state.events)?;
         Ok(())
     }
 
@@ -121,7 +247,8 @@ impl Journal {
         broadcast::Receiver<Arc<JournalEvent>>,
         Vec<Arc<JournalEvent>>,
     ) {
-        let state = self.state.lock().unwrap();
+        let guard = self.state.lock().unwrap();
+        let state = guard.as_ref().expect("journal state is initialized");
         (
             self.sender.subscribe(),
             state.events.iter().cloned().collect(),
@@ -129,22 +256,30 @@ impl Journal {
     }
 
     /// The most recently captured screenshot still in the buffer: what the
-    /// agent is looking at now.
+    /// agent just saw and is marking.
     pub(crate) fn latest_screenshot(&self) -> Option<(String, Arc<Vec<u8>>)> {
-        let state = self.state.lock().unwrap();
-        state
-            .screenshots
-            .back()
-            .map(|(id, png)| (id.clone(), png.clone()))
+        let guard = self.state.lock().unwrap();
+        let state = guard.as_ref().expect("journal state is initialized");
+        let id = state.screenshots.back()?;
+        let bytes = state
+            .directory
+            .read(format!("screenshots/{id}.png"))
+            .ok()
+            .map(Arc::new)?;
+        Some((id.clone(), bytes))
     }
 
     pub(crate) fn screenshot(&self, id: &str) -> Option<Arc<Vec<u8>>> {
-        let state = self.state.lock().unwrap();
+        let guard = self.state.lock().unwrap();
+        let state = guard.as_ref().expect("journal state is initialized");
+        if !state.screenshots.iter().any(|stored_id| stored_id == id) {
+            return None;
+        }
         state
-            .screenshots
-            .iter()
-            .find(|(stored_id, _)| stored_id == id)
-            .map(|(_, png)| png.clone())
+            .directory
+            .read(format!("screenshots/{id}.png"))
+            .ok()
+            .map(Arc::new)
     }
 
     /// Snapshots an inclusive screenshot range in journal order. Both boundary
@@ -155,24 +290,93 @@ impl Journal {
         from: &str,
         to: &str,
     ) -> anyhow::Result<Vec<(String, Arc<Vec<u8>>)>> {
-        let state = self.state.lock().unwrap();
+        let guard = self.state.lock().unwrap();
+        let state = guard.as_ref().expect("journal state is initialized");
         let start = state
             .screenshots
             .iter()
-            .position(|(id, _)| id == from)
+            .position(|id| id == from)
             .ok_or_else(|| anyhow::anyhow!("screenshot evicted: {from}"))?;
         let end = state
             .screenshots
             .iter()
-            .position(|(id, _)| id == to)
+            .position(|id| id == to)
             .ok_or_else(|| anyhow::anyhow!("screenshot evicted: {to}"))?;
         anyhow::ensure!(start <= end, "screenshot range is not in journal order");
-        Ok(state
-            .screenshots
-            .range(start..=end)
-            .map(|(id, png)| (id.clone(), png.clone()))
-            .collect())
+        let mut results = Vec::with_capacity(end - start + 1);
+        for id in state.screenshots.range(start..=end) {
+            let bytes = state
+                .directory
+                .read(format!("screenshots/{id}.png"))
+                .with_context(|| format!("failed to read retained screenshot {id}"))?;
+            results.push((id.clone(), Arc::new(bytes)));
+        }
+        Ok(results)
     }
+}
+
+#[cfg(test)]
+impl Drop for Journal {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.state.lock() {
+            let _ = guard.take();
+        }
+        if let Some(root) = self.temp_root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
+fn write_screenshot(directory: &Dir, id: &str, png: &[u8]) -> anyhow::Result<()> {
+    let mut file = directory.create(format!("screenshots/{id}.png"))?;
+    file.write_all(png)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+fn open_append(directory: &Dir) -> anyhow::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    Ok(directory.open_with("events.jsonl", &options)?)
+}
+
+fn compact_events_file(
+    directory: &Dir,
+    events: &VecDeque<Arc<JournalEvent>>,
+) -> anyhow::Result<usize> {
+    let mut temp = directory.create("events.tmp")?;
+    for event in events {
+        let mut line = serde_json::to_vec(&**event)?;
+        line.push(b'\n');
+        temp.write_all(&line)?;
+    }
+    temp.sync_data()?;
+    drop(temp);
+    directory.rename("events.tmp", directory, "events.jsonl")?;
+    Ok(events.len())
+}
+
+fn persist_event(
+    state: &mut State,
+    event: &JournalEvent,
+    max_events: usize,
+) -> anyhow::Result<()> {
+    if state.lines_on_disk >= max_events.saturating_mul(2) {
+        state.events_file = None;
+        state.lines_on_disk = compact_events_file(&state.directory, &state.events)?;
+        state.events_file = Some(open_append(&state.directory)?);
+        return Ok(());
+    }
+    if state.events_file.is_none() {
+        state.events_file = Some(open_append(&state.directory)?);
+    }
+    let file = state.events_file.as_mut().unwrap();
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    file.flush()?;
+    state.lines_on_disk += 1;
+    Ok(())
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -262,5 +466,73 @@ mod tests {
         assert_eq!(snapshot.len(), MAX_EVENTS);
         assert_eq!(snapshot.first().unwrap().seq, 3);
         assert_eq!(snapshot.last().unwrap().seq, (MAX_EVENTS + 2) as u64);
+    }
+
+    #[test]
+    fn disk_journal_evicts_old_files_compacts_events_and_resumes_across_restarts() {
+        let root = std::env::temp_dir().join(format!(
+            "qbt-journal-persist-{}-{}",
+            std::process::id(),
+            now_ms(),
+        ));
+        let store = ArtifactStore::new(&root).unwrap();
+        {
+            let journal = Journal::open_with_limits(&store, 3, 2, None).unwrap();
+            journal.append("action", serde_json::json!({"step": 1}), Some(vec![10]));
+            journal.append("action", serde_json::json!({"step": 2}), Some(vec![20]));
+            journal.append("action", serde_json::json!({"step": 3}), Some(vec![30]));
+            journal.append("note", serde_json::json!({"step": 4}), None);
+            journal.flush().unwrap();
+        }
+
+        let journal_dir = root.join("journal");
+        assert!(!journal_dir.join("screenshots/shot_1.png").exists());
+        assert!(journal_dir.join("screenshots/shot_2.png").exists());
+        assert!(journal_dir.join("screenshots/shot_3.png").exists());
+
+        // Simulate an orphan screenshot and a partial trailing line before reopening.
+        std::fs::write(journal_dir.join("screenshots/shot_99.png"), b"orphan").unwrap();
+        std::fs::write(journal_dir.join("events.tmp"), b"stale").unwrap();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(journal_dir.join("events.jsonl"))
+                .unwrap();
+            f.write_all(b"{\"seq\":999,\"incomplete").unwrap();
+        }
+
+        {
+            let reopened = Journal::open_with_limits(&store, 3, 2, None).unwrap();
+            assert!(!journal_dir.join("screenshots/shot_99.png").exists());
+            assert!(!journal_dir.join("events.tmp").exists());
+
+            let (_, snapshot) = reopened.subscribe_with_snapshot();
+            let seqs: Vec<u64> = snapshot.iter().map(|e| e.seq).collect();
+            assert_eq!(seqs, vec![2, 3, 4]);
+            assert_eq!(*reopened.screenshot("shot_2").unwrap(), vec![20]);
+            assert_eq!(*reopened.screenshot("shot_3").unwrap(), vec![30]);
+
+            let next = reopened.append("after_restart", serde_json::json!({}), Some(vec![50]));
+            assert_eq!(next.seq, 5);
+            assert_eq!(next.screenshot_id.as_deref(), Some("shot_5"));
+            assert!(!journal_dir.join("screenshots/shot_2.png").exists());
+            assert!(journal_dir.join("screenshots/shot_3.png").exists());
+            assert!(journal_dir.join("screenshots/shot_5.png").exists());
+            reopened.flush().unwrap();
+        }
+
+        let lines: Vec<JournalEvent> = std::fs::read_to_string(journal_dir.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            lines.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -15,38 +15,27 @@ Run the server (agent port, then observatory WebSocket port):
 cargo run -- serve 1234 5678
 ```
 
-`serve` retains the newest 200 screenshots as encoded PNGs. Configure the
+`serve` retains the newest 500 screenshots as encoded PNGs on disk under
+`<artifact-root>/journal/screenshots/`. Configure the
 capacity and the root for saved artifacts at startup:
 
 ```powershell
-cargo run -- serve 1234 5678 --max-screenshots 200 --artifact-root runs
+cargo run -- serve 1234 5678 --max-screenshots 500 --artifact-root runs
 ```
 
-The startup log estimates the buffer's memory from a fresh PNG sample. Both
+The startup log estimates the buffer's footprint from a fresh PNG sample. Both
 settings take effect when the server starts.
 
-Pass `--record-journal` to also persist every journal event and full-screen PNG
-under `<artifact-root>/journal/<pid>-<nanos>-<seq>/` (`events.jsonl`,
-`screenshots/<id>.png`, and `status.json`), independent of the live 500-event
-and `--max-screenshots` memory rings:
-
-```powershell
-cargo run -- serve 1234 5678 --artifact-root runs --record-journal --journal-max-bytes 536870912
-```
-
-Each backend incarnation creates its own subdirectory so a backend restart
-never overwrites earlier recordings. `status.json` starts with
-`"complete": false` and is atomically updated to `"complete": true` only when
-`qbt` exits cleanly. Reaching `--journal-max-bytes` (default 512 MiB) or an I/O
-failure records `"error"` in `status.json` and stops the backend rather than
-continuing with an incomplete recording.
-
-qbt keeps the newest 500 events in an in-memory journal: it
+qbt keeps the newest 2,000 events and 500 screenshots in a bounded disk-backed
+journal under `<artifact-root>/journal/` (`events.jsonl` and
+`screenshots/shot_<seq>.png`): it
 records every computer action it executes (with a full-screen screenshot for
 screen-capturing actions), and the agent publishes transcript and status
 events into the same journal via the `publish_event` action. Observatory
 clients connect to the WebSocket port and receive the journal — a snapshot,
-then live events, in one order — and fetch screenshots by id. One agent
+then live events, in one order — and fetch screenshots by id. Reopening the
+same `--artifact-root` after a backend restart resumes sequence numbers
+monotonically while evicting older entries and PNGs past the window. One agent
 connection is served at a time; a newly connecting agent replaces the
 previous one, so a restarted CLI can always reconnect.
 

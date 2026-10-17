@@ -21,8 +21,8 @@ export interface JournalEvent {
 	screenshotId?: string;
 }
 
-const MAX_CACHED_SCREENSHOTS = 20;
-const MAX_CLIENT_EVENTS = 500;
+const MAX_CACHED_SCREENSHOTS = 40;
+const MAX_CLIENT_EVENTS = 2000;
 const RECONNECT_DELAY_MS = 1000;
 
 /**

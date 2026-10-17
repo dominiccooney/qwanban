@@ -234,8 +234,7 @@ function Initialize-QwanbanWorkerJob {
         [string]$QbtExecutable = 'C:\Program Files\qwanban\qbt.exe',
         [ValidateRange(1, 65535)][int]$QbtAgentPort = 1234,
         [ValidateRange(0, 65535)][int]$QbtObservatoryPort = 5678,
-        [ValidateRange(1, 100000)][int]$QbtMaxScreenshots = 200,
-        [ValidateRange(1, [long]::MaxValue)][long]$QbtJournalMaxBytes = 536870912
+        [ValidateRange(1, 100000)][int]$QbtMaxScreenshots = 500
     )
     if ($null -eq $Metadata) {
         $Metadata = Read-QwanbanWorkerMetadata -MetadataBaseUri $MetadataBaseUri
@@ -282,11 +281,11 @@ function Initialize-QwanbanWorkerJob {
 
     # Build a cmd.exe-compatible launch command so Cline's ComputerBackendRestart
     # (`spawn(command, { shell: true })`) restarts qbt against the same job root
-    # and durable journal settings.
+    # and bounded disk-backed journal settings.
     $quotedQbt = ConvertTo-QwanbanCmdDoubleQuoted $QbtExecutable
     $quotedQbtRoot = ConvertTo-QwanbanCmdDoubleQuoted $qbtRoot
     $observatoryPortArg = if ($QbtObservatoryPort -gt 0) { " $QbtObservatoryPort" } else { '' }
-    $backendCommand = "$quotedQbt serve $QbtAgentPort$observatoryPortArg --artifact-root $quotedQbtRoot --max-screenshots $QbtMaxScreenshots --record-journal --journal-max-bytes $QbtJournalMaxBytes"
+    $backendCommand = "$quotedQbt serve $QbtAgentPort$observatoryPortArg --artifact-root $quotedQbtRoot --max-screenshots $QbtMaxScreenshots"
 
     $bypassHosts = @('localhost', '127.0.0.1', '::1', '169.254.169.254', 'metadata.google.internal')
     foreach ($url in @($Metadata.WorkerUrl, $Metadata.FriendzoneBootstrapUrl)) {
@@ -359,8 +358,6 @@ function Initialize-QwanbanWorkerJob {
             observatoryPort = $QbtObservatoryPort
             artifactRoot    = $qbtRoot
             maxScreenshots  = $QbtMaxScreenshots
-            recordJournal   = $true
-            journalMaxBytes = $QbtJournalMaxBytes
             backendCommand  = $backendCommand
         }
     }
@@ -433,34 +430,6 @@ function Stop-QwanbanBackend {
     throw "qbt on 127.0.0.1:$Port acknowledged shutdown_backend but the port remained open after ${TimeoutMilliseconds}ms"
 }
 
-function Read-QwanbanIncarnationStatus {
-    param(
-        [Parameter(Mandatory)][IO.DirectoryInfo]$Directory,
-        [int]$SettleMilliseconds = 2000
-    )
-    $tmpPath = Join-Path $Directory.FullName 'status.tmp'
-    $statusPath = Join-Path $Directory.FullName 'status.json'
-    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($SettleMilliseconds)
-    while ([DateTimeOffset]::UtcNow -lt $deadline) {
-        if (-not (Test-Path -LiteralPath $tmpPath) -and (Test-Path -LiteralPath $statusPath)) {
-            try {
-                $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-                if ($status.complete -eq $true -or $null -ne $status.error) {
-                    return $status
-                }
-            } catch {}
-        }
-        Start-Sleep -Milliseconds 50
-    }
-    if (Test-Path -LiteralPath $tmpPath) {
-        throw "qbt journal incarnation '$($Directory.Name)' has an uncommitted status.tmp"
-    }
-    if (-not (Test-Path -LiteralPath $statusPath)) {
-        throw "qbt journal incarnation '$($Directory.Name)' is missing status.json"
-    }
-    return (Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop)
-}
-
 function Assert-QwanbanWritersQuiescent {
     [CmdletBinding()]
     param(
@@ -482,20 +451,33 @@ function Assert-QwanbanWritersQuiescent {
     }
 
     $journalRoot = Join-Path $JobRoot 'qbt\journal'
-    $incarnations = @()
-    if (Test-Path -LiteralPath $journalRoot) {
-        $incarnations = @(Get-ChildItem -LiteralPath $journalRoot -Directory | Sort-Object Name)
+    $tmpPath = Join-Path $journalRoot 'events.tmp'
+    $eventsPath = Join-Path $journalRoot 'events.jsonl'
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(2000)
+    while ([DateTimeOffset]::UtcNow -lt $deadline -and (Test-Path -LiteralPath $tmpPath)) {
+        Start-Sleep -Milliseconds 50
     }
-    if ($RequireCompleteJournal -and $incarnations.Count -eq 0) {
-        throw "No qbt journal recordings found under $journalRoot"
+    if (Test-Path -LiteralPath $tmpPath) {
+        throw "qbt journal under $journalRoot has an uncommitted events.tmp"
     }
 
-    foreach ($dir in $incarnations) {
-        $SettleMs = if ($RequireCompleteJournal) { 2000 } else { 200 }
-        $status = Read-QwanbanIncarnationStatus -Directory $dir -SettleMilliseconds $SettleMs
-        if ($RequireCompleteJournal -and $status.complete -ne $true) {
-            $errText = if ($null -ne $status.error) { [string]$status.error } else { 'backend did not finish recording cleanly' }
-            throw "qbt journal incarnation '$($dir.Name)' is incomplete ($errText)"
+    if ($RequireCompleteJournal) {
+        if (-not (Test-Path -LiteralPath $eventsPath)) {
+            throw "No qbt journal events.jsonl found under $journalRoot"
+        }
+        $lines = @(Get-Content -LiteralPath $eventsPath -Encoding UTF8 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($lines.Count -eq 0) {
+            throw "qbt journal $eventsPath is empty"
+        }
+        foreach ($line in $lines) {
+            try {
+                $parsed = $line | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $parsed.seq) {
+                    throw 'missing seq field'
+                }
+            } catch {
+                throw "qbt journal $eventsPath contains a corrupt line: $($_.Exception.Message)"
+            }
         }
     }
 }

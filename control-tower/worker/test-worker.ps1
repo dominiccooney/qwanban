@@ -193,6 +193,11 @@ try {
     $qbtAgentPort = ([Net.IPEndPoint]$qbtPortListener.LocalEndpoint).Port
     $qbtPortListener.Stop()
 
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).ProviderPath
+    & cargo build --quiet --manifest-path (Join-Path $repoRoot 'qbt\Cargo.toml') --bin qbt
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build --bin qbt failed with exit code $LASTEXITCODE"
+    }
     $qbtExe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..\target\debug')).ProviderPath 'qbt.exe'
     if (-not (Test-Path -LiteralPath $qbtExe)) {
         throw "Expected compiled qbt binary at $qbtExe"
@@ -233,12 +238,11 @@ try {
     Write-QwanbanAtomicFile -Path $manifest.cline.logPath -Text '{"msg":"cline started"}'
     Write-QwanbanAtomicFile -Path (Join-Path $manifest.outputDir 'summary.txt') -Text 'QA passed'
 
-    # 3. Start real `qbt.exe serve --record-journal` on $qbtAgentPort
+    # 3. Start real `qbt.exe serve` on $qbtAgentPort
     $qbtProc = Start-Process -FilePath $qbtExe -ArgumentList @(
         'serve', [string]$qbtAgentPort,
         '--artifact-root', $manifest.qbt.artifactRoot,
-        '--max-screenshots', '5',
-        '--record-journal'
+        '--max-screenshots', '5'
     ) -PassThru -WindowStyle Hidden
 
     try {
@@ -265,7 +269,7 @@ try {
             $tcp.Dispose()
         }
 
-        # Verify packaging refuses while qbt is still running (and status.json is complete=false)
+        # Verify packaging refuses while qbt is still running
         $liveRejected = $false
         try {
             [void](New-QwanbanJobArchive -JobRoot $manifest.jobRoot -QbtAgentPort $qbtAgentPort -RequireCompleteJournal)
@@ -354,13 +358,13 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $extractDir 'cline\sessions\session-1.json'))) {
         throw 'Extracted archive missing cline/sessions/session-1.json'
     }
-    $extractedJournals = @(Get-ChildItem -LiteralPath (Join-Path $extractDir 'qbt\journal') -Directory)
-    if ($extractedJournals.Count -ne 1) {
-        throw "Expected 1 extracted qbt journal directory, found $($extractedJournals.Count)"
+    $extractedEventsPath = Join-Path $extractDir 'qbt\journal\events.jsonl'
+    if (-not (Test-Path -LiteralPath $extractedEventsPath)) {
+        throw 'Extracted archive missing qbt/journal/events.jsonl'
     }
-    $extractedStatus = Get-Content -LiteralPath (Join-Path $extractedJournals[0].FullName 'status.json') -Raw | ConvertFrom-Json
-    if ($extractedStatus.complete -ne $true -or $extractedStatus.events -ne 1) {
-        throw "Unexpected extracted journal status: $($extractedStatus | ConvertTo-Json -Compress)"
+    $extractedEvents = @(Get-Content -LiteralPath $extractedEventsPath -Encoding UTF8 | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($extractedEvents.Count -ne 1 -or $extractedEvents[0].kind -cne 'transcript.message') {
+        throw "Unexpected extracted journal events: $($extractedEvents | ConvertTo-Json -Compress)"
     }
 
     # 5. Verify incomplete journal recording blocks 'completed' outcome but allows 'failed' outcome
@@ -381,10 +385,9 @@ try {
         -QbtExecutable $qbtExe `
         -QbtAgentPort $qbtAgentPort `
         -QbtObservatoryPort 0
-    $badJournalDir = Join-Path $failedManifest.qbt.artifactRoot 'journal\999-1-0'
+    $badJournalDir = Join-Path $failedManifest.qbt.artifactRoot 'journal'
     [IO.Directory]::CreateDirectory($badJournalDir) | Out-Null
-    Write-QwanbanAtomicFile -Path (Join-Path $badJournalDir 'status.json') -Text '{"version":1,"complete":false,"events":3,"bytes":120,"error":"journal byte limit reached"}'
-    Write-QwanbanAtomicFile -Path (Join-Path $badJournalDir 'events.jsonl') -Text '{"seq":1}'
+    Write-QwanbanAtomicFile -Path (Join-Path $badJournalDir 'events.jsonl') -Text '{"seq":1,"truncated'
 
     $completedBlocked = $false
     try {

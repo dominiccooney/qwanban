@@ -12,7 +12,6 @@ mod journal;
 mod marks;
 mod observed;
 mod pal;
-mod recording;
 
 #[derive(Parser)]
 #[command(about = "Qwanban native support tools", name = "qbt")]
@@ -32,12 +31,6 @@ enum CliCommand {
         artifact_root: PathBuf,
         #[arg(long, default_value_t = journal::DEFAULT_MAX_SCREENSHOTS)]
         max_screenshots: usize,
-        /// Persist events and screenshots under artifact-root/journal.
-        #[arg(long)]
-        record_journal: bool,
-        /// Event JSON and PNG byte limit for this backend incarnation.
-        #[arg(long, default_value_t = 512 * 1024 * 1024, value_parser = clap::value_parser!(u64).range(1..))]
-        journal_max_bytes: u64,
     },
     Flipbook {
         #[arg(long)]
@@ -67,8 +60,6 @@ async fn main() -> anyhow::Result<()> {
             ws_port,
             artifact_root,
             max_screenshots,
-            record_journal,
-            journal_max_bytes,
         }) => {
             anyhow::ensure!(
                 *max_screenshots > 0,
@@ -80,9 +71,7 @@ async fn main() -> anyhow::Result<()> {
             // token shared by both servers and all their connections.
             let artifacts = std::sync::Arc::new(artifacts::ArtifactStore::new(artifact_root)?);
             let shutdown = CancellationToken::new();
-            let journal = if *record_journal {
-                journal::Journal::recording(*max_screenshots, recording::Recording::new(&artifacts, *journal_max_bytes, shutdown.clone())?)
-            } else { journal::Journal::new(*max_screenshots) };
+            let journal = journal::Journal::open(&artifacts, *max_screenshots)?;
 
             eprintln!("artifact root: {}", artifacts.root().display());
 
@@ -109,8 +98,8 @@ async fn main() -> anyhow::Result<()> {
 
             let estimate_capacity = *max_screenshots;
             std::thread::Builder::new()
-                .name("qbt-memory-estimate".into())
-                .spawn(move || print_screenshot_memory_estimate(estimate_capacity))?;
+                .name("qbt-disk-estimate".into())
+                .spawn(move || print_screenshot_disk_estimate(estimate_capacity))?;
 
             eprintln!("ctrl-c to quit.");
             tokio::select! {
@@ -130,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 observatory_result?;
             }
             clipboard_result?;
-            journal.finish_recording()?;
+            journal.flush()?;
             Ok(())
         }
         Some(CliCommand::Flipbook {
@@ -148,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn print_screenshot_memory_estimate(max_screenshots: usize) {
+fn print_screenshot_disk_estimate(max_screenshots: usize) {
     let estimate = (|| -> anyhow::Result<usize> {
         let screenshot = pal::screenshot()?;
         let mut png = Vec::new();
@@ -162,11 +151,11 @@ fn print_screenshot_memory_estimate(max_screenshots: usize) {
             let estimated_bytes = max_screenshots as u128 * last_png_size as u128;
             let estimated_mib = estimated_bytes as f64 / (1024.0 * 1024.0);
             eprintln!(
-                "screenshot buffer capacity: {max_screenshots}; estimated memory: {estimated_bytes} bytes ({max_screenshots} × {last_png_size}-byte PNG, {estimated_mib:.1} MiB)"
+                "screenshot buffer capacity: {max_screenshots}; estimated disk: {estimated_bytes} bytes ({max_screenshots} × {last_png_size}-byte PNG, {estimated_mib:.1} MiB)"
             );
         }
         Err(error) => eprintln!(
-            "screenshot buffer capacity: {max_screenshots}; estimated memory unavailable (startup PNG sample failed: {error})"
+            "screenshot buffer capacity: {max_screenshots}; estimated disk unavailable (startup PNG sample failed: {error})"
         ),
     }
 }

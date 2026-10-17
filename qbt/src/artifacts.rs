@@ -1,7 +1,4 @@
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_JOURNAL_ID: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct ArtifactStore {
     root: PathBuf,
@@ -108,19 +105,10 @@ impl ArtifactStore {
         &self.root
     }
 
-    /// Hold a fresh directory capability for one backend's private journal files.
+    /// Opens the directory capability for the artifact root's bounded journal.
     pub(crate) fn journal_directory(&self) -> anyhow::Result<cap_std::fs::Dir> {
         self.directory.create_dir_all("journal")?;
-        let name = format!(
-            "journal/{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos(),
-            NEXT_JOURNAL_ID.fetch_add(1, Ordering::Relaxed),
-        );
-        self.directory.create_dir(&name)?;
-        Ok(self.directory.open_dir(name)?)
+        Ok(self.directory.open_dir("journal")?)
     }
 }
 
