@@ -370,6 +370,8 @@ mod tests {
             labels(&reopened),
             vec![(1, "Launcher clicked".into()), (2, "Editor open".into())]
         );
+        drop(reopened);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -378,6 +380,7 @@ mod tests {
         let (root, store) = store("empty-label");
         assert!(mark(&store, "shot_1", &png(), "   ").is_err());
         assert!(list(&store).unwrap().is_empty());
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -443,6 +446,7 @@ mod tests {
         let again = flipbook(&store, "my run", None).unwrap();
         assert!(again.webp.ends_with("my-run-2/my-run-2.webp"));
         assert!(list(&store).unwrap().is_empty());
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -461,6 +465,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no pending marks"));
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -483,6 +488,7 @@ mod tests {
                 .count(),
             0
         );
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

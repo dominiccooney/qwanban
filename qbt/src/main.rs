@@ -113,13 +113,14 @@ async fn main() -> anyhow::Result<()> {
                 Some(observatory_server) => Some(observatory_server.await),
                 None => None,
             };
+            let flush_result = journal.flush();
             let clipboard_result = pal::shutdown_clipboard();
             agent_result?;
             if let Some(observatory_result) = observatory_result {
                 observatory_result?;
             }
+            flush_result?;
             clipboard_result?;
-            journal.flush()?;
             Ok(())
         }
         Some(CliCommand::Flipbook {

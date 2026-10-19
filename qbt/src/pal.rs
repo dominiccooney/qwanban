@@ -44,7 +44,7 @@ pub(crate) use foreground::{CapturedScreenshot, ForegroundWindow};
 pub(crate) fn screenshot() -> anyhow::Result<CapturedScreenshot> {
     #[cfg(target_os = "windows")]
     {
-        return retry_read_once(|| foreground::capture(|| ScreenSampler::new()?.screenshot()));
+        retry_read_once(|| foreground::capture(|| ScreenSampler::new()?.screenshot()))
     }
 
     #[cfg(not(target_os = "windows"))]

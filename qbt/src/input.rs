@@ -180,12 +180,11 @@ fn parse_key_token(token: &str) -> Result<Key, String> {
     if let Some(key) = key {
         return Ok(key);
     }
-    if let Some(number) = lower.strip_prefix('f') {
-        if let Ok(index) = number.parse::<usize>() {
-            if (1..=12).contains(&index) {
-                return Ok(Key::F(index));
-            }
-        }
+    if let Some(number) = lower.strip_prefix('f')
+        && let Ok(index) = number.parse::<usize>()
+        && (1..=12).contains(&index)
+    {
+        return Ok(Key::F(index));
     }
     let mut characters = token.chars();
     if let (Some(character), None) = (characters.next(), characters.next()) {
@@ -201,7 +200,7 @@ pub(crate) async fn type_text(_input: &SyntheticInput, text: &str) -> anyhow::Re
     return pal::type_text(text).await;
 
     #[cfg(not(target_os = "linux"))]
-    for ch in text.chars().into_iter() {
+    for ch in text.chars() {
         let key = Key::Typed(ch);
         _input.key_down(key)?;
         tokio::time::sleep(Duration::from_millis(60)).await;

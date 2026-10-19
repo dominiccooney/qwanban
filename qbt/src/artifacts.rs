@@ -2,7 +2,9 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) struct ArtifactStore {
     root: PathBuf,
-    directory: cap_std::fs::Dir,
+    directory: Option<cap_std::fs::Dir>,
+    #[cfg(test)]
+    cleanup_on_drop: bool,
 }
 
 impl ArtifactStore {
@@ -14,9 +16,27 @@ impl ArtifactStore {
             "artifact root must be valid UTF-8 so saved paths can be returned to clients"
         );
         Ok(Self {
-            directory: cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())?,
+            directory: Some(cap_std::fs::Dir::open_ambient_dir(
+                &root,
+                cap_std::ambient_authority(),
+            )?),
             root,
+            #[cfg(test)]
+            cleanup_on_drop: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_temp(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let mut store = Self::new(root)?;
+        store.cleanup_on_drop = true;
+        Ok(store)
+    }
+
+    fn directory(&self) -> &cap_std::fs::Dir {
+        self.directory
+            .as_ref()
+            .expect("artifact store directory is open")
     }
 
     /// Checks a caller-supplied path and returns it relative to the root.
@@ -46,7 +66,7 @@ impl ArtifactStore {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            self.directory.create_dir_all(parent)?;
+            self.directory().create_dir_all(parent)?;
         }
         Ok(())
     }
@@ -56,24 +76,24 @@ impl ArtifactStore {
         self.create_parent(&relative)?;
         // All resolution and the write are relative to the held directory
         // capability, so a concurrent symlink swap cannot escape the root.
-        self.directory.write(&relative, bytes)?;
+        self.directory().write(&relative, bytes)?;
         Ok(self.root.join(relative))
     }
 
     pub(crate) fn read(&self, path: &Path) -> anyhow::Result<Vec<u8>> {
-        Ok(self.directory.read(self.relative(path)?)?)
+        Ok(self.directory().read(self.relative(path)?)?)
     }
 
     pub(crate) fn remove(&self, path: &Path) -> anyhow::Result<()> {
-        Ok(self.directory.remove_file(self.relative(path)?)?)
+        Ok(self.directory().remove_file(self.relative(path)?)?)
     }
 
     /// Moves a file within the root, creating the destination's parents.
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<PathBuf> {
         let to = self.relative(to)?;
         self.create_parent(&to)?;
-        self.directory
-            .rename(self.relative(from)?, &self.directory, &to)?;
+        self.directory()
+            .rename(self.relative(from)?, self.directory(), &to)?;
         Ok(self.root.join(to))
     }
 
@@ -81,7 +101,7 @@ impl ArtifactStore {
     /// directory lists as empty.
     pub(crate) fn list_files(&self, directory: &Path) -> anyhow::Result<Vec<String>> {
         let relative = self.relative(directory)?;
-        let entries = match self.directory.read_dir(&relative) {
+        let entries = match self.directory().read_dir(&relative) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -98,7 +118,7 @@ impl ArtifactStore {
     }
 
     pub(crate) fn exists(&self, path: &Path) -> anyhow::Result<bool> {
-        Ok(self.directory.exists(self.relative(path)?))
+        Ok(self.directory().exists(self.relative(path)?))
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -107,8 +127,18 @@ impl ArtifactStore {
 
     /// Opens the directory capability for the artifact root's bounded journal.
     pub(crate) fn journal_directory(&self) -> anyhow::Result<cap_std::fs::Dir> {
-        self.directory.create_dir_all("journal")?;
-        Ok(self.directory.open_dir("journal")?)
+        self.directory().create_dir_all("journal")?;
+        Ok(self.directory().open_dir("journal")?)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ArtifactStore {
+    fn drop(&mut self) {
+        let _ = self.directory.take();
+        if self.cleanup_on_drop {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }
 
@@ -136,6 +166,7 @@ mod tests {
         let saved = store.save(Path::new("runs/x/a.png"), b"png").unwrap();
         assert_eq!(saved, root.canonicalize().unwrap().join("runs/x/a.png"));
         assert_eq!(std::fs::read(saved).unwrap(), b"png");
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -147,6 +178,7 @@ mod tests {
         let outside = root.parent().unwrap().join("outside.png");
         assert!(store.save(&outside, b"png").is_err());
         assert!(!outside.exists());
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

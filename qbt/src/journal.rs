@@ -129,10 +129,8 @@ impl Journal {
             }
         }
 
-        let retained_files: HashSet<String> = screenshots
-            .iter()
-            .map(|id| format!("{id}.png"))
-            .collect();
+        let retained_files: HashSet<String> =
+            screenshots.iter().map(|id| format!("{id}.png")).collect();
         if let Ok(entries) = directory.read_dir("screenshots") {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -356,11 +354,7 @@ fn compact_events_file(
     Ok(events.len())
 }
 
-fn persist_event(
-    state: &mut State,
-    event: &JournalEvent,
-    max_events: usize,
-) -> anyhow::Result<()> {
+fn persist_event(state: &mut State, event: &JournalEvent, max_events: usize) -> anyhow::Result<()> {
     if state.lines_on_disk >= max_events.saturating_mul(2) {
         state.events_file = None;
         state.lines_on_disk = compact_events_file(&state.directory, &state.events)?;

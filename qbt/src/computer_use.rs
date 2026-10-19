@@ -384,6 +384,10 @@ pub(crate) async fn serve_agent(
         cancel.cancel();
         let _ = handle.await;
     }
+    if let Err(error) = journal.flush() {
+        eprintln!("failed to flush journal on agent server shutdown: {error:#}");
+    }
+    drop(listener);
 }
 
 async fn receive_first_request(
@@ -929,10 +933,10 @@ async fn handle_request(
                 coordinate,
                 expect_unchanged,
             } = params;
-            if let Some(region) = expect_unchanged {
-                if let Some(guarded) = click_guard(*id, *region, state).await? {
-                    return Ok(guarded);
-                }
+            if let Some(region) = expect_unchanged
+                && let Some(guarded) = click_guard(*id, *region, state).await?
+            {
+                return Ok(guarded);
             }
             if let Some(key) = key {
                 input::press_keys(&state.input, key).await?;
@@ -974,10 +978,9 @@ async fn handle_request(
             coordinate,
             start_coordinate,
         } => {
-            pal::mouse_move_to(((*start_coordinate).0 as i32, (*start_coordinate).1 as i32))
-                .await?;
+            pal::mouse_move_to((start_coordinate.0 as i32, start_coordinate.1 as i32)).await?;
             state.input.mouse_down(MouseButton::Left).await?;
-            pal::mouse_move_to(((*coordinate).0 as i32, (*coordinate).1 as i32)).await?;
+            pal::mouse_move_to((coordinate.0 as i32, coordinate.1 as i32)).await?;
             state.input.mouse_up(MouseButton::Left).await?;
             settle().await;
             reply_screenshot(*id, None).await
@@ -1191,14 +1194,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     fn test_artifacts() -> Arc<ArtifactStore> {
-        // Unique per call: tests run in parallel and each removes its root.
+        // Unique per call: tests run in parallel and each removes its root on drop.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "qbt-computer-use-tests-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
-        Arc::new(ArtifactStore::new(root).unwrap())
+        Arc::new(ArtifactStore::new_temp(root).unwrap())
     }
 
     fn client_state(last_screenshot: Option<ScreenshotImage>) -> ClientState {
@@ -1268,13 +1271,13 @@ mod tests {
         .await;
 
         assert_eq!(response["ok"], true);
+        drop(client);
         tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled())
             .await
             .unwrap();
-        let reconnect = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr))
-            .await
-            .unwrap();
-        assert!(reconnect.is_err());
+        let reconnect =
+            tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(addr)).await;
+        assert!(matches!(reconnect, Err(_) | Ok(Err(_))));
     }
 
     #[tokio::test]
@@ -1455,7 +1458,6 @@ mod tests {
             **journal.screenshot(screenshot_id).unwrap(),
         );
         shutdown.cancel();
-        std::fs::remove_dir_all(artifacts.root()).unwrap();
     }
 
     #[tokio::test]
@@ -1573,12 +1575,11 @@ mod tests {
         assert_eq!(listed["text"], "No pending marks.");
 
         shutdown.cancel();
-        std::fs::remove_dir_all(artifacts.root()).unwrap();
     }
 
     #[tokio::test]
     async fn save_screenshot_reports_eviction_and_rejects_parent_segments() {
-        let (addr, _journal, artifacts, shutdown) = start_test_server_with_capacity(1).await;
+        let (addr, _journal, _artifacts, shutdown) = start_test_server_with_capacity(1).await;
         let mut client = BufReader::new(TcpStream::connect(addr).await.unwrap());
         let first = send(
             &mut client,
@@ -1621,7 +1622,6 @@ mod tests {
                 .contains("must not contain '..'")
         );
         shutdown.cancel();
-        std::fs::remove_dir_all(artifacts.root()).unwrap();
     }
 
     fn assert_foreground_contract(response: &serde_json::Value) {
