@@ -165,6 +165,16 @@ impl App {
         Ok(result)
     }
 
+    pub async fn delete(&self, id: Uuid) -> Result<()> {
+        let mut store = self.store.lock().await;
+        let mut next = store.ledger.clone();
+        store.retire_job(&mut next, id)?;
+        self.cloud.lock().await.retain(next.jobs.values());
+        store.commit(next)?;
+        self.publish(&store);
+        Ok(())
+    }
+
     pub async fn retry(&self, id: Uuid) -> Result<Job> {
         // Retry takes effect at this ledger commit, serialized with cloud work;
         // it resumes the saved intent without changing resource identities.
@@ -318,15 +328,7 @@ impl App {
             .count()
             .saturating_sub(config.limits.max_finished_jobs);
         for (id, _) in finished.into_iter().take(remove) {
-            if next.jobs[&id].artifact.is_some() {
-                match std::fs::remove_file(store.artifact_path(id)) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            next.jobs.remove(&id);
-            next.retired_ids.insert(id);
+            store.retire_job(&mut next, id)?;
         }
         self.cloud.lock().await.retain(next.jobs.values());
         store.commit(next)?;
@@ -488,12 +490,8 @@ async fn advance(job: &mut Job, clients: &mut Clients) -> Result<()> {
                 job.outcome.get_or_insert(Outcome::Lost);
                 begin_cleanup(job);
             } else if job.outcome.is_some() {
-                // Without a known operation, retry the same insertion to settle an
-                // uncertain earlier request before attempting cleanup.
-                let op = api.insert(job).await?;
-                job.phase = Phase::Provisioning {
-                    operation: Some(cloud::operation_name(&op)?),
-                };
+                job.finished_at = Some(now());
+                job.phase = Phase::Finished;
             } else {
                 let op = api.insert(job).await?;
                 job.phase = Phase::Provisioning {

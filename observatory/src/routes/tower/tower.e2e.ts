@@ -36,6 +36,8 @@ test('launches through the real controller and relays transcript, capture and sc
 	await expect(card.locator('img.front')).toBeVisible();
 	expect(sockets.length).toBeGreaterThan(0);
 	expect(sockets.every((url) => url.startsWith('ws://127.0.0.1:4180/api/jobs/'))).toBe(true);
+	await card.getByText('Prompt & setup', { exact: true }).click();
+	await expect(card).toContainText('Inspect the checkout');
 	await card.getByTitle('Open session').click();
 	await page.getByRole('button', { name: 'Driver transcript' }).click();
 	await expect(page.locator('.event')).toContainText('Hello from the relayed worker');
@@ -50,4 +52,6 @@ test('launches through the real controller and relays transcript, capture and sc
 	await expect(history).toContainText('cancelled');
 	await history.locator('summary').click();
 	await expect(history).toContainText('Inspect the checkout');
+	await history.getByRole('button', { name: 'Delete', exact: true }).click();
+	await expect(history).toHaveCount(0);
 });

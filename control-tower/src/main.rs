@@ -34,6 +34,9 @@ enum Command {
     Cancel {
         id: Uuid,
     },
+    Delete {
+        id: Uuid,
+    },
     Retry {
         id: Uuid,
     },
@@ -87,6 +90,13 @@ async fn main() -> Result<()> {
         Command::Cancel { id } => {
             client
                 .post(format!("{base}/api/jobs/{id}/cancel"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await?
+        }
+        Command::Delete { id } => {
+            client
+                .post(format!("{base}/api/jobs/{id}/delete"))
                 .json(&serde_json::json!({}))
                 .send()
                 .await?

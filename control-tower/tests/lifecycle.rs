@@ -1452,3 +1452,85 @@ async fn yaml_replacement_publishes_valid_snapshots_and_preserves_rejected_reloa
     cancel.cancel();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_insert_and_deletes_from_history()
+ {
+    let fixture = Fixture::new().await;
+    fixture.fake.lock().unwrap().insert_status = Some(StatusCode::BAD_REQUEST);
+    let app = fixture.app();
+    let cancelled = app.submit(submission()).await.unwrap().submission.id;
+    app.tick().await.unwrap();
+    app.tick().await.unwrap();
+    assert!(matches!(
+        app.changed.borrow().jobs[&cancelled].phase,
+        Phase::Blocked { failures: 1, .. }
+    ));
+    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
+    let router = control_tower::http::operator(app.clone());
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(
+                &format!("/api/jobs/{cancelled}/delete"),
+                "POST",
+                "127.0.0.1:1234",
+                Body::from("{}"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    app.finish(cancelled, None, Outcome::Cancelled)
+        .await
+        .unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&cancelled].active());
+    assert_eq!(
+        app.changed.borrow().jobs[&cancelled].outcome,
+        Some(Outcome::Cancelled)
+    );
+    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
+
+    let timed_out_submission = submission();
+    let timed_out = timed_out_submission.id;
+    app.submit(timed_out_submission.clone()).await.unwrap();
+    app.tick().await.unwrap();
+    app.tick().await.unwrap();
+    assert!(matches!(
+        app.changed.borrow().jobs[&timed_out].phase,
+        Phase::Blocked { failures: 1, .. }
+    ));
+    {
+        let mut store = app.store.lock().await;
+        let mut next = store.ledger.clone();
+        next.jobs.get_mut(&timed_out).unwrap().created_at = 0;
+        store.commit(next).unwrap();
+        app.publish(&store);
+    }
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&timed_out].active());
+    assert_eq!(
+        app.changed.borrow().jobs[&timed_out].outcome,
+        Some(Outcome::TimedOut)
+    );
+    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 2);
+
+    assert_eq!(
+        router
+            .oneshot(request(
+                &format!("/api/jobs/{timed_out}/delete"),
+                "POST",
+                "127.0.0.1:1234",
+                Body::from("{}"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!app.changed.borrow().jobs.contains_key(&timed_out));
+    assert!(app.changed.borrow().retired_ids.contains(&timed_out));
+    assert!(app.submit(timed_out_submission).await.is_err());
+}

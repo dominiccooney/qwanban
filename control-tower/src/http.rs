@@ -47,6 +47,7 @@ pub fn operator(app: Arc<App>) -> Router {
     Router::new()
         .route("/api/jobs", get(list).post(submit))
         .route("/api/jobs/{id}/cancel", post(cancel))
+        .route("/api/jobs/{id}/delete", post(delete))
         .route("/api/jobs/{id}/retry", post(retry))
         .route("/api/jobs/{id}/artifact", get(download))
         .route("/api/jobs/{id}/observatory", get(relay))
@@ -150,6 +151,13 @@ async fn cancel(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<crate::model::Job>> {
     Ok(Json(app.finish(id, None, Outcome::Cancelled).await?))
+}
+async fn delete(
+    State(app): State<Arc<App>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    app.delete(id).await?;
+    Ok(Json(json!({"deleted": id})))
 }
 async fn retry(
     State(app): State<Arc<App>>,

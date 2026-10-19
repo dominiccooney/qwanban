@@ -55,12 +55,17 @@ button {
 	transition: background 0.15s;
 }
 
-button:hover {
+button:enabled:hover {
 	background: #7f5cad;
 }
 
-button:active {
+button:enabled:active {
 	background: #4b2d70;
+}
+
+button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
 }
 
 button:focus-visible {

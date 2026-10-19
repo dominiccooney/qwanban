@@ -43,6 +43,7 @@ control-tower --config /etc/control-tower/config.yaml submit \
 control-tower --config /etc/control-tower/config.yaml list
 control-tower --config /etc/control-tower/config.yaml cancel JOB_UUID
 control-tower --config /etc/control-tower/config.yaml retry JOB_UUID
+control-tower --config /etc/control-tower/config.yaml delete JOB_UUID
 ```
 
 Submission prints its UUID before making the request. Reuse `--id UUID` with exactly the same submission when retrying an uncertain request. An existing ID returns the existing job, not another VM. Expired IDs cannot be reused.

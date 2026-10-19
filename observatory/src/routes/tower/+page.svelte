@@ -37,7 +37,6 @@
 	let submissionId: string | undefined;
 	let submittedBody: string | undefined;
 	let selected: string | undefined = $state(undefined);
-	let details: string | undefined = $state(undefined);
 	const hosts = new SvelteMap<string, Host>();
 	const lifetime = new AbortController();
 	let disposed = false;
@@ -156,6 +155,16 @@
 		try {
 			await request(`/api/jobs/${job.submission.id}/cancel`, {});
 			await refresh();
+			error = '';
+		} catch (cause) {
+			error = String(cause);
+		}
+	}
+	async function remove(job: Job): Promise<void> {
+		try {
+			await request(`/api/jobs/${job.submission.id}/delete`, {});
+			await refresh();
+			error = '';
 		} catch (cause) {
 			error = String(cause);
 		}
@@ -217,9 +226,13 @@
 				{@const host = hosts.get(job.submission.id)}
 				<article>
 					<div class="job-heading">
-						<strong>{job.submission.title}</strong><span class="phase"
-							>{job.phase.kind.replaceAll('_', ' ')}</span
-						>
+						<strong>{job.submission.title}</strong>
+						<div class="phases">
+							<span class="phase">{job.phase.kind.replaceAll('_', ' ')}</span>
+							{#if job.phase.phase}
+								<span class="phase">{job.phase.phase.kind.replaceAll('_', ' ')}</span>
+							{/if}
+						</div>
 					</div>
 					<p class="meta">
 						{job.submission.worker_profile} · {job.submission.source} · {new Date(
@@ -228,7 +241,7 @@
 					</p>
 					<p class="meta">
 						{job.ip ?? 'IP pending'}{#if job.outcome}
-							· {job.outcome}{/if}
+							· {job.outcome.replaceAll('_', ' ')}{/if}
 					</p>
 					{#if job.last_error}<p class="error">{job.last_error}</p>{/if}
 					{#if job.phase.kind === 'blocked'}<p class="error">
@@ -243,22 +256,28 @@
 					{#if host}<HostChit {host} onOpen={() => (selected = job.submission.id)}
 							>{#snippet controls()}{/snippet}</HostChit
 						>{/if}
+					<details class="job-details">
+						<summary>Prompt &amp; setup</summary>
+						<p class="meta">Job ID: <code>{job.submission.id}</code></p>
+						{#if job.submission.prompt}
+							<p class="detail-label">Prompt</p>
+							<pre>{job.submission.prompt}</pre>
+						{/if}
+						{#if job.submission.setup_script}
+							<p class="detail-label">Setup script</p>
+							<pre>{job.submission.setup_script}</pre>
+						{/if}
+					</details>
 					<div class="actions">
 						{#if job.phase.kind === 'blocked'}<button onclick={() => void retry(job)}>Retry</button
 							>{/if}
-						<button
-							onclick={() =>
-								(details = details === job.submission.id ? undefined : job.submission.id)}
-							>Submission</button
-						><button disabled={!!job.outcome} onclick={() => void cancel(job)}>Cancel</button
-						>{#if job.artifact}
+						{#if !job.outcome}<button onclick={() => void cancel(job)}>Cancel</button
+							>{:else if job.phase.kind !== 'blocked'}<button disabled>Deleting VM…</button>{/if}
+						{#if job.artifact}
 							<a download rel="external" href={`/api/jobs/${job.submission.id}/artifact`}
 								>Download packet</a
 							>{/if}
 					</div>
-					{#if details === job.submission.id}<pre>{job.submission.prompt}</pre>
-						<pre>{job.submission.setup_script}</pre>
-						<code>{job.submission.id}</code>{/if}
 				</article>
 			{:else}<p class="empty">
 					No active workers. Launch a job here or submit one from cron.
@@ -269,7 +288,7 @@
 			<details class="history">
 				<summary
 					><strong>{job.submission.title}</strong><span
-						>{job.outcome} · {job.submission.worker_profile} · {new Date(
+						>{job.outcome?.replaceAll('_', ' ')} · {job.submission.worker_profile} · {new Date(
 							job.created_at * 1000
 						).toLocaleString()}</span
 					></summary
@@ -278,14 +297,23 @@
 				{#if job.failure_error ?? job.last_error}<p class="error">
 						{job.failure_error ?? job.last_error}
 					</p>{/if}
-				<pre>{job.submission.prompt}</pre>
-				<pre>{job.submission.setup_script}</pre>
-				{#if job.artifact}
-					<a download rel="external" href={`/api/jobs/${job.submission.id}/artifact`}
-						>Download packet ({job.artifact.bytes.toLocaleString()} bytes)</a
-					>{:else}<p>No retained packet.</p>{/if}
+				{#if job.submission.prompt}
+					<p class="detail-label">Prompt</p>
+					<pre>{job.submission.prompt}</pre>
+				{/if}
+				{#if job.submission.setup_script}
+					<p class="detail-label">Setup script</p>
+					<pre>{job.submission.setup_script}</pre>
+				{/if}
+				<div class="actions">
+					{#if job.artifact}
+						<a download rel="external" href={`/api/jobs/${job.submission.id}/artifact`}
+							>Download packet ({job.artifact.bytes.toLocaleString()} bytes)</a
+						>{:else}<span class="meta">No retained packet.</span>{/if}
+					<button onclick={() => void remove(job)}>Delete</button>
+				</div>
 			</details>
-		{/each}
+		{:else}<p class="empty">No finished jobs.</p>{/each}
 	{/if}
 </div>
 
@@ -358,12 +386,30 @@
 		width: 100%;
 		box-sizing: border-box;
 	}
+	.phases {
+		display: flex;
+		gap: 0.35rem;
+	}
 	.phase {
 		background: #e4f0f3;
 		color: #163c4c;
 		border-radius: 1rem;
 		padding: 0.2rem 0.6rem;
 		font-size: 0.8rem;
+	}
+	.job-details {
+		margin-top: 0.8rem;
+	}
+	.job-details summary,
+	.submit summary,
+	.history summary {
+		cursor: pointer;
+	}
+	.detail-label {
+		margin: 0.6rem 0 0.2rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: #163c4c;
 	}
 	.meta,
 	.history span {
