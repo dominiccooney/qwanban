@@ -111,6 +111,8 @@ Provisioning settings are persisted, so keep old cloud/Friendzone endpoints avai
 
 Insufficient scopes, denied permissions, invalid requests and unsupported responses stop automatic attempts and show `blocked` with the error. Transient network/timeouts, rate limits and service failures back off for 5, 10, 20 and 40 seconds; the fifth consecutive failure blocks the job. A successful reconciliation resets the failure count. These retry states survive restart. After fixing the cause, use **Retry**, the CLI `retry JOB_UUID`, or `POST /api/jobs/JOB_UUID/retry` with `{}` to resume the same job, insertion UUID and pending operation. A blocked job is not finished: it may still own a VM or need cleanup. Cancel requests cleanup without discarding uncertain provisioning; cleanup can itself block and need Retry. Job deadlines still initiate cleanup while monitoring is blocked.
 
+**Delete** (CLI `delete JOB_UUID`, `POST /api/jobs/JOB_UUID/delete`) removes a job from the ledger and discards its packet. A finished job is removed immediately. An active job is cancelled first, suspended cleanup resumes, and the job is removed once its VM and Friendzone registration are gone; it shows `Deleting…` until then. Deleted IDs cannot be resubmitted.
+
 The lifecycle controller is deliberately serialized. Slow cloud calls can delay submissions/completion; the read-only dashboard uses the last committed snapshot. The ledger is intended for a modest single-controller installation, not a distributed scheduler. Transcripts and screenshots remain qbt's live bounded journal and disappear with its VM unless the worker includes them in its packet.
 
 ## Tests

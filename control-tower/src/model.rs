@@ -106,6 +106,9 @@ pub struct Job {
     #[serde(default)]
     pub failure_error: Option<String>,
     pub artifact: Option<Artifact>,
+    /// Operator asked for the job to leave the ledger as soon as cleanup finishes.
+    #[serde(default)]
+    pub delete: bool,
 }
 
 impl Job {

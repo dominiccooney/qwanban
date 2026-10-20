@@ -1454,8 +1454,7 @@ async fn yaml_replacement_publishes_valid_snapshots_and_preserves_rejected_reloa
 }
 
 #[tokio::test]
-async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_insert_and_deletes_from_history()
- {
+async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_insert() {
     let fixture = Fixture::new().await;
     fixture.fake.lock().unwrap().insert_status = Some(StatusCode::BAD_REQUEST);
     let app = fixture.app();
@@ -1466,22 +1465,6 @@ async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_i
         app.changed.borrow().jobs[&cancelled].phase,
         Phase::Blocked { failures: 1, .. }
     ));
-    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
-    let router = control_tower::http::operator(app.clone());
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(request(
-                &format!("/api/jobs/{cancelled}/delete"),
-                "POST",
-                "127.0.0.1:1234",
-                Body::from("{}"),
-            ))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
-    );
     app.finish(cancelled, None, Outcome::Cancelled)
         .await
         .unwrap();
@@ -1493,15 +1476,9 @@ async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_i
     );
     assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
 
-    let timed_out_submission = submission();
-    let timed_out = timed_out_submission.id;
-    app.submit(timed_out_submission.clone()).await.unwrap();
+    let timed_out = app.submit(submission()).await.unwrap().submission.id;
     app.tick().await.unwrap();
     app.tick().await.unwrap();
-    assert!(matches!(
-        app.changed.borrow().jobs[&timed_out].phase,
-        Phase::Blocked { failures: 1, .. }
-    ));
     {
         let mut store = app.store.lock().await;
         let mut next = store.ledger.clone();
@@ -1516,11 +1493,38 @@ async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_i
         Some(Outcome::TimedOut)
     );
     assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 2);
+}
 
+#[tokio::test]
+async fn delete_removes_blocked_finished_and_running_jobs_only_after_cleanup() {
+    let fixture = Fixture::new().await;
+    fixture.fake.lock().unwrap().insert_status = Some(StatusCode::BAD_REQUEST);
+    let app = fixture.app();
+    let router = control_tower::http::operator(app.clone());
+    // A provisioning failure that already timed out: Delete must finish it in
+    // one pass without issuing another insert, then drop it from the ledger.
+    let blocked_submission = submission();
+    let blocked = blocked_submission.id;
+    app.submit(blocked_submission.clone()).await.unwrap();
+    app.tick().await.unwrap();
+    app.tick().await.unwrap();
+    {
+        let mut store = app.store.lock().await;
+        let mut next = store.ledger.clone();
+        let job = next.jobs.get_mut(&blocked).unwrap();
+        job.outcome = Some(Outcome::TimedOut);
+        store.commit(next).unwrap();
+        app.publish(&store);
+    }
+    assert!(matches!(
+        app.changed.borrow().jobs[&blocked].phase,
+        Phase::Blocked { .. }
+    ));
     assert_eq!(
         router
+            .clone()
             .oneshot(request(
-                &format!("/api/jobs/{timed_out}/delete"),
+                &format!("/api/jobs/{blocked}/delete"),
                 "POST",
                 "127.0.0.1:1234",
                 Body::from("{}"),
@@ -1530,7 +1534,59 @@ async fn cancelled_or_timed_out_blocked_provisioning_finishes_without_retrying_i
             .status(),
         StatusCode::OK
     );
-    assert!(!app.changed.borrow().jobs.contains_key(&timed_out));
-    assert!(app.changed.borrow().retired_ids.contains(&timed_out));
-    assert!(app.submit(timed_out_submission).await.is_err());
+    assert!(app.changed.borrow().jobs[&blocked].delete);
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs.contains_key(&blocked));
+    assert!(app.changed.borrow().retired_ids.contains(&blocked));
+    assert_eq!(fixture.fake.lock().unwrap().inserted.len(), 1);
+    assert!(app.submit(blocked_submission).await.is_err());
+
+    // A finished job leaves immediately, with its packet.
+    fixture.fake.lock().unwrap().insert_status = None;
+    let finished = running(&app).await;
+    let bytes = vec![0x28, 0xb5, 0x2f, 0xfd, 1];
+    assert_eq!(
+        control_tower::http::worker(app.clone())
+            .oneshot(request(
+                &format!("/jobs/{finished}/artifact"),
+                "POST",
+                "127.0.0.1:1234",
+                Body::from(bytes),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let packet = app.store.lock().await.artifact_path(finished);
+    app.finish(
+        finished,
+        Some("127.0.0.1".parse().unwrap()),
+        Outcome::Completed,
+    )
+    .await
+    .unwrap();
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs[&finished].active());
+    app.delete(finished).await.unwrap();
+    assert!(!app.changed.borrow().jobs.contains_key(&finished));
+    assert!(!packet.exists());
+
+    // A running job is cancelled, its VM deleted, and only then removed.
+    let live = running(&app).await;
+    fixture.fake.lock().unwrap().pending_delete = true;
+    app.delete(live).await.unwrap();
+    app.tick().await.unwrap();
+    let job = app.changed.borrow().jobs[&live].clone();
+    assert_eq!(job.outcome, Some(Outcome::Cancelled));
+    assert!(job.active());
+    assert!(matches!(job.phase, Phase::Cleaning { delete: true, .. }));
+    {
+        let mut fake = fixture.fake.lock().unwrap();
+        fake.pending_delete = false;
+        fake.instance = None;
+    }
+    app.tick().await.unwrap();
+    assert!(!app.changed.borrow().jobs.contains_key(&live));
+    assert_eq!(fixture.fake.lock().unwrap().deleted.len(), 2);
 }

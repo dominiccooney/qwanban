@@ -23,6 +23,7 @@
 		last_error: string | null;
 		failure_error: string | null;
 		artifact: { bytes: number } | null;
+		delete: boolean;
 	}
 	let jobs: Job[] = $state([]);
 	let workerProfiles: string[] = $state([]);
@@ -161,6 +162,8 @@
 		}
 	}
 	async function remove(job: Job): Promise<void> {
+		if (job.phase.kind !== 'finished' && !confirm(`Delete ${job.submission.title} and its VM?`))
+			return;
 		try {
 			await request(`/api/jobs/${job.submission.id}/delete`, {});
 			await refresh();
@@ -271,8 +274,9 @@
 					<div class="actions">
 						{#if job.phase.kind === 'blocked'}<button onclick={() => void retry(job)}>Retry</button
 							>{/if}
-						{#if !job.outcome}<button onclick={() => void cancel(job)}>Cancel</button
-							>{:else if job.phase.kind !== 'blocked'}<button disabled>Deleting VM…</button>{/if}
+						{#if !job.outcome}<button onclick={() => void cancel(job)}>Cancel</button>{/if}
+						{#if job.delete && job.phase.kind !== 'blocked'}<button disabled>Deleting…</button
+							>{:else}<button onclick={() => void remove(job)}>Delete</button>{/if}
 						{#if job.artifact}
 							<a download rel="external" href={`/api/jobs/${job.submission.id}/artifact`}
 								>Download packet</a

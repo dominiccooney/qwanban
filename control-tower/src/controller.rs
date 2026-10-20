@@ -99,6 +99,7 @@ impl App {
             last_error: None,
             failure_error: None,
             artifact: None,
+            delete: false,
         };
         let metadata = job.metadata();
         for (key, value) in &metadata {
@@ -165,13 +166,38 @@ impl App {
         Ok(result)
     }
 
+    /// Delete is the operator's single "make this job go away" action. A finished
+    /// job leaves the ledger now. An active job is cancelled if it has no outcome,
+    /// any suspended cleanup resumes, and retention retires it once cleanup
+    /// finishes so a VM or Friendzone registration is never orphaned.
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let mut store = self.store.lock().await;
         let mut next = store.ledger.clone();
-        store.retire_job(&mut next, id)?;
+        let job = next.jobs.get_mut(&id).context("unknown job")?;
+        if job.active() {
+            job.delete = true;
+            job.outcome.get_or_insert(Outcome::Cancelled);
+            job.updated_at = now();
+            if let Phase::Retrying { phase, .. } | Phase::Blocked { phase, .. } = &job.phase {
+                job.phase = (**phase).clone();
+            }
+            if matches!(job.phase, Phase::Queued) {
+                job.phase = Phase::Finished;
+                job.finished_at = Some(now());
+            } else if !matches!(
+                job.phase,
+                Phase::Provisioning { .. } | Phase::Cleaning { .. }
+            ) {
+                begin_cleanup(job);
+            }
+        }
+        if !job.active() {
+            store.retire_job(&mut next, id)?;
+        }
         self.cloud.lock().await.retain(next.jobs.values());
         store.commit(next)?;
         self.publish(&store);
+        self.wake.notify_one();
         Ok(())
     }
 
@@ -314,6 +340,15 @@ impl App {
             }
         }
         store.expire_artifacts(&mut next, config.limits.artifact_budget_bytes)?;
+        let requested: Vec<Uuid> = next
+            .jobs
+            .values()
+            .filter(|j| j.delete && !j.active())
+            .map(|j| j.submission.id)
+            .collect();
+        for id in requested {
+            store.retire_job(&mut next, id)?;
+        }
         let mut finished: Vec<_> = next
             .jobs
             .values()

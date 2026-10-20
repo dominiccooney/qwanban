@@ -19,6 +19,21 @@ test('shows insufficient scopes as blocked and explicitly retries the same job',
 	await expect(card).toHaveCount(0, { timeout: 15000 });
 });
 
+test('deletes a blocked job that never got a VM straight from its card', async ({ page }) => {
+	await page.goto('/tower');
+	await page.getByText('Launch a job', { exact: true }).click();
+	await page.getByLabel('Title', { exact: true }).fill('Dead on arrival');
+	await page.getByLabel('Prompt', { exact: true }).fill('Test invalid image');
+	await page.getByRole('button', { name: 'Launch job', exact: true }).click();
+	const card = page.locator('article').filter({ hasText: 'Dead on arrival' });
+	await expect(card.getByText('blocked', { exact: true })).toBeVisible({ timeout: 15000 });
+	await expect(card).toContainText('was not found');
+	page.once('dialog', (dialog) => void dialog.accept());
+	await card.getByRole('button', { name: 'Delete', exact: true }).click();
+	await expect(card).toHaveCount(0, { timeout: 15000 });
+	await expect(page.locator('.history').filter({ hasText: 'Dead on arrival' })).toHaveCount(0);
+});
+
 test('launches through the real controller and relays transcript, capture and screenshots', async ({
 	page
 }) => {

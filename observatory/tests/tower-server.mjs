@@ -41,6 +41,24 @@ const cloud = http.createServer(async (request, response) => {
 		return response.end(JSON.stringify({ name: url.pathname.split('/').at(-1), status: 'DONE' }));
 	if (request.method === 'POST') {
 		const body = JSON.parse(text);
+		// Permanent rejection, like an image path that names a missing project.
+		if (
+			body.metadata?.items?.some(
+				(item) => item.key === 'control-tower-prompt' && item.value === 'Test invalid image'
+			)
+		) {
+			response.statusCode = 400;
+			return response.end(
+				JSON.stringify({
+					error: {
+						code: 400,
+						message:
+							"Invalid value for field 'resource.disks[0].initializeParams.sourceImage': 'projects/your-project/global/images/your-windows-image'. The project 'your-project' was not found.",
+						status: 'INVALID_ARGUMENT'
+					}
+				})
+			);
+		}
 		// Reject one real SDK insertion per selected job, then allow an
 		// operator retry of the same insertion UUID to succeed.
 		if (

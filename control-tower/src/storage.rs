@@ -144,14 +144,11 @@ impl Store {
         self.root.join("artifacts").join(format!("{id}.part"))
     }
 
-    /// Maintenance, upload admission and operator deletion use the same retirement
-    /// path so removed jobs always release their packet and retire their UUID.
+    /// History retention and operator deletion use the same retirement path so
+    /// removed jobs always release their packet and retire their UUID.
     pub fn retire_job(&self, next: &mut Ledger, id: Uuid) -> Result<()> {
         let job = next.jobs.get(&id).context("unknown job")?;
-        ensure!(
-            !job.active(),
-            "active job cannot be deleted before cleanup finishes"
-        );
+        ensure!(!job.active(), "job still owns cloud resources");
         if job.artifact.is_some() {
             match fs::remove_file(self.artifact_path(id)) {
                 Ok(()) => {}

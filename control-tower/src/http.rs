@@ -157,7 +157,7 @@ async fn delete(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     app.delete(id).await?;
-    Ok(Json(json!({"deleted": id})))
+    Ok(Json(json!({"id": id})))
 }
 async fn retry(
     State(app): State<Arc<App>>,
