@@ -292,7 +292,10 @@ impl Api {
             .set_labels([("control-tower-job", job.submission.id.simple().to_string())])
             .set_metadata(model::Metadata::new().set_items(items))
             .set_tags(model::Tags::new().set_items(profile.network_tags.clone()))
-            .set_scheduling(model::Scheduling::new().set_automatic_restart(false));
+            .set_scheduling(model::Scheduling::new().set_automatic_restart(false))
+            // Without a display device Windows runs the console at VGA 640x480;
+            // the GGA adapter lets the worker pick a desktop-sized mode.
+            .set_display_device(model::DisplayDevice::new().set_enable_display(true));
         // Empty service_accounts/access_configs are omitted by the SDK serializer.
         // GCE's REST contract gives omitted arrays the same no-account/no-NAT meaning.
         optional(

@@ -466,7 +466,7 @@ sudo -u control-tower /opt/control-tower/bin/control-tower \
   --config /etc/control-tower/config.yaml list
 ```
 
-Record the returned UUID, VM name, IP, GCE ID and boot-disk name. An accepted submission is not a running worker. In the administrator shell, use `gcloud compute instances describe ct-UUID_WITHOUT_HYPHENS --zone="$ZONE" --format='yaml(id,status,networkInterfaces,serviceAccounts,disks)'` to verify private-only networking, no account, one boot disk with `autoDelete: true`, and the expected image/machine type.
+Record the returned UUID, VM name, IP, GCE ID and boot-disk name. An accepted submission is not a running worker. In the administrator shell, use `gcloud compute instances describe ct-UUID_WITHOUT_HYPHENS --zone="$ZONE" --format='yaml(id,status,networkInterfaces,serviceAccounts,disks,displayDevice)'` to verify private-only networking, no account, one boot disk with `autoDelete: true`, `enableDisplay: true`, and the expected image/machine type.
 
 Acceptance checks:
 
