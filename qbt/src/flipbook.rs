@@ -9,7 +9,7 @@ const WEBP_QUALITY: f32 = 75.0;
 const RANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// The final frame stays up this long before the animation loops, so a
 /// reader has time to take in the end state.
-pub(crate) const LAST_FRAME_HOLD_MS: i32 = 3500;
+pub(crate) const LAST_FRAME_HOLD_MS: i32 = 5000;
 /// Captioned frames are shrunk to this fraction of the screen so the file
 /// stays small enough to drop into a pull request comment.
 const CAPTIONED_FRAME_SCALE: f32 = 0.5;
@@ -207,7 +207,7 @@ fn caption(frame: &mut image::RgbaImage, index: usize, total: usize, label: &str
     use ab_glyph::{Font, FontRef, ScaleFont};
 
     let (width, height) = frame.dimensions();
-    let band_height = ((height as f32) * 0.11).round().clamp(14.0, 96.0) as u32;
+    let band_height = ((height as f32) * 0.06).round().clamp(14.0, 96.0) as u32;
     let band_height = band_height.min(height);
     let band_top = height - band_height;
     for y in band_top..height {

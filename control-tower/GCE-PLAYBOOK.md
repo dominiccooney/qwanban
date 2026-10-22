@@ -52,7 +52,7 @@ gcloud config set project "$PROJECT"
 gcloud services enable compute.googleapis.com iam.googleapis.com iap.googleapis.com oslogin.googleapis.com
 gcloud iam service-accounts create control-tower --display-name='Control Tower'
 
-PERMISSIONS='compute.instances.create,compute.instances.get,compute.instances.delete,compute.instances.setMetadata,compute.instances.setTags,compute.instances.setLabels,compute.disks.create,compute.images.useReadOnly,compute.subnetworks.use,compute.zoneOperations.get'
+PERMISSIONS='compute.instances.create,compute.instances.get,compute.instances.delete,compute.instances.setMetadata,compute.instances.setTags,compute.instances.setLabels,compute.instances.updateDisplayDevice,compute.disks.create,compute.images.useReadOnly,compute.subnetworks.use,compute.zoneOperations.get'
 gcloud iam roles create controlTowerWorkerManager --project="$PROJECT" \
   --title='Control Tower Worker Manager' --stage=GA --permissions="$PERMISSIONS"
 gcloud projects add-iam-policy-binding "$PROJECT" \

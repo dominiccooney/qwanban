@@ -39,7 +39,7 @@ enum CliCommand {
         to: String,
         #[arg(long)]
         out: PathBuf,
-        #[arg(long, default_value_t = 2.0)]
+        #[arg(long, default_value_t = 1.0)]
         fps: f64,
         #[arg(long, default_value = "ws://127.0.0.1:5678")]
         observatory: String,
